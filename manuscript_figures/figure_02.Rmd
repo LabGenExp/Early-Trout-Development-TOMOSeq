@@ -1,0 +1,392 @@
+---
+title: "Manuscript figure: Figure 2"
+author: "Kateřina Šimková & Ravindra Naraine"
+date: "June, 06 2025"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Library
+```{r library}
+library("qs2")
+library("patchwork")
+library("extrafont")
+library("ggplot2")
+library("DESeq2")
+library("dplyr")
+library("purrr")
+```
+
+# Custom functions
+```{r}
+# Define a function to plot PCA
+func_plot_pca <- function(data = "data", x = "PC", y = "PC", colour = "Position") {
+  ggplot() +
+    geom_point(data = data, mapping = aes(x = {{x}}, y = {{y}}, colour = {{colour}}), size = 2, shape = 16) +
+    xlab(label = temp1_2$labels$x) + 
+    ylab(label = temp1_2$labels$y) + 
+    scale_colour_discrete(
+      labels = c("0_hpf", "1_hpf", "1_dpf", "3_dpf")
+    ) +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_blank(),
+          text = element_text(family = "Arial"),
+          axis.title = element_text(colour = "black", size = 7, face = "plain"),
+          axis.text.x = element_text(colour = "black", size = 7, face = "plain"),
+          axis.text.y = element_text(colour = "black", size = 7, face = "plain"),
+          axis.line = element_line(linewidth = 0.5, colour = "black"),
+          legend.position = "right", 
+          legend.text = element_text(colour = "black", size = 5.5, face = "plain"), 
+          legend.title = element_text(colour = "black", size = 6.5, face = "plain")) + 
+    labs(colour = "Stage")
+}
+
+# Define a function to count genes by category (Degradation, De novo transcription, Non DEGs) for each stage
+get_stage_counts <- function(stage_col, stage_label) {
+  profile_comparison %>%
+    # Add a column "Stage" with the current stage label
+    dplyr::mutate(Stage = stage_label,
+                  # Categorize each gene into a group based on both the course profile and pairwise DEG status
+                  Group = case_when(
+                    course_profile_stages == "degradation" & !!sym(stage_col) == "degrade" ~ "Degradation",
+                    course_profile_stages == "denovo" & !!sym(stage_col) == "denovo" ~ "De novo transcription"
+                  )) %>%
+    # Remove rows where no group was assigned (e.g., mismatches or unrelated entries)
+    dplyr::filter(!is.na(Group)) %>%
+    # Keep only unique gene IDs for each Stage–Group pair to avoid duplicates
+    dplyr::distinct(gene_id, Stage, Group) %>%
+    # Count the number of genes in each group
+    dplyr::count(Stage, Group, name = "Value")
+}
+
+#Function to create example DLTs
+graph_TOMO_stage_boxplot <- function(gene = "enter gene_id") {
+  # Extract data for the given gene
+  data <- plotCounts(ddsTC$stages, gene = gene, intgroup = c("Stage"), returnData = TRUE)
+
+  # Update factor levels for Stage with custom labels
+  data$Stage <- factor(data$Stage, levels = c("0_hpf", "1_hpf", "1_dpf", "3_dpf"))
+  data$Stage_label <- recode_factor(data$Stage,
+                                    "0_hpf" = "0\nhpf",
+                                    "1_hpf" = "1\nhpf",
+                                    "1_dpf" = "1\ndpf",
+                                    "3_dpf" = "3\ndpf")
+
+  # Dynamically construct the title
+  plot_title <- bquote(bold("RNA-seq example ") * bolditalic(.(gene)))
+
+  # Create the boxplot
+  ggplot(data, aes(x = Stage_label, y = count, fill = Stage)) + 
+    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+    geom_jitter(width = 0.2, alpha = 0.8, color = "black", size = 1) +
+    ggtitle(plot_title) +
+    labs(x = "", y = "Counts") +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.border = element_blank(),
+      panel.background = element_blank(),
+      plot.title = element_text(size = 7, family = "Arial", hjust = 1, face = "bold"),
+      text = element_text(family = "Arial"),
+      axis.title = element_text(colour = "black", size = 7),
+      axis.text.x = element_text(colour = "black", size = 7, angle = 0, hjust = 0.4),
+      axis.text.y = element_text(colour = "black", size = 7),
+      axis.line = element_line(size = 0.5, colour = "black"),
+      legend.position = "none"
+    )
+}
+```
+
+# Load workspace
+```{r load particular objects}
+file_path <- "~/objects/"
+# Load profile comparison data from Trout TOMO-Seq dataset
+# from 05_Orthology.Rmd
+profile_comparison <- qs_read(file.path(file_path, "profile_comparison_3.qs2"),
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# Load variance stabilized object from Trout TOMO-Seq dataset
+# from 02_Differential_Analysis.Rmd
+rld <- qs_read(file.path(file_path, "rld.qs2"), 
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# Load qualimap for intronic analysis
+# qualimap.qs2 is qualimap_genomic_origin xls stored in dataset R
+# from 01_FastQ_Preprocessing.Rmd
+qualimap <- qs_read(file.path(file_path, "qualimap.qs2"), 
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# Load DESeqDataSet from Trout TOMO-Seq dataset
+# from 02_Differential_Analysis.Rmd
+ddsTC <- qs_read(file.path(file_path, "ddsTC.qs2"), 
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+```
+
+# PCA plot of stages
+```{r}
+name1 = "stages"
+temp1_1 <- rld$blind[[name1]]
+temp1_2 <- plotPCA(temp1_1, intgroup = c('Stage', 'SampleName', 'Female_source'), ntop = 500)
+# PCA plotted
+p_1 <- func_plot_pca(data = temp1_2$data, x = PC1, y = PC2, colour = Stage) 
+print(p_1)
+```
+
+# Transcript abundance alteration
+```{r}
+# Define the names of the DEG comparison columns and their corresponding plot labels
+stage_names <- c("Stage_1_hpf_vs_0_hpf", "Stage_1_dpf_vs_0_hpf", "Stage_3_dpf_vs_0_hpf")
+stage_labels <- c("1_hpf", "1_dpf", "3_dpf")
+
+# Apply the function to all stage comparisons and combine the results into one data frame
+data <- map2_dfr(stage_names, stage_labels, get_stage_counts)
+
+# Set factor levels and labels for consistent ordering and display in plots
+data <- data %>%
+  dplyr::mutate(
+    Stage = factor(Stage, levels = stage_labels),
+    Group = factor(Group, levels = c("Degradation", "De novo transcription"))
+  )
+
+#Stacked bar chart
+p_2 <- ggplot(data, aes(fill = Group, y = Value, x = Stage)) + 
+  geom_bar(position = "stack", stat = "identity") +
+  # scale_y_continuous(labels = percent) +
+   scale_fill_manual(
+    values = c(
+      "Non DEGs" = "#66c2a5",
+      "Degradation" = "#8da0cb",
+      "De novo transcription" = "#e78ac3"
+    )) +
+  labs(x = " ",y = "# of transcripts") +
+  theme(
+    panel.background = element_blank(),       
+    plot.background = element_blank(),        
+    panel.grid.major = element_blank(),       
+    panel.grid.minor = element_blank(),
+    legend.background = element_blank(),
+    axis.title = element_text(colour="black", size = 7, face="plain"),
+    axis.text.x = element_text(colour="black", size = 7, face="plain"),
+    axis.text.y = element_text(colour="black", size = 7, face="plain"),
+    axis.line = element_line(size = 0.5, colour = "black"),
+    legend.text = element_text(colour="black", size = 5.5, face="plain"), 
+    legend.title = element_text(colour="black", size = 6.5, face="plain"), 
+    text = element_text(family = "Arial"))
+
+print(p_2)
+```
+
+# Intronic and intergenic regions
+```{r}
+#Proportion of intronic and intergenic regions in transcriptome
+p_3 <- ggplot(data = qualimap, aes(x = Stage, y = Intronic_intergenic, fill = Section)) +
+  geom_bar(aes(x = factor(Stage, levels = c("0_hpf", "1_hpf", "1_dpf", "3_dpf"))), 
+           stat='summary', fun='mean', position = "dodge") + 
+  geom_point(aes(x = factor(Stage, levels = c("0_hpf", "1_hpf", "1_dpf", "3_dpf")), 
+                 group = Section), 
+             position = position_dodge(width = 0.9), size = 1) +
+  scale_fill_manual(values = c("A" = "#9D88C1", "B" = "#CCC8E1", "C" = "#e2ccc0", "D" = "#FED098", "E" = "#F2AB79" )) +
+  labs(y = "Intronic & intergenic regions [%]", x = "Stage") +
+  scale_x_discrete(name = "Stage", labels = c("0_hpf" = "0 hpf", "1_hpf" = "1 hpf", "1_dpf" = "1 dpf", "3_dpf" = "3 dpf")) +
+  theme_classic() + 
+  theme(
+    text = element_text(family = "Arial"),  
+    plot.title = element_text(size = 7, hjust = 0.5, face = "bold"),  
+    axis.title.x = element_text(colour = "black",size = 7),  
+    axis.title.y = element_text(colour = "black",size = 7),  
+    axis.text = element_text(colour = "black",size = 7),  
+    legend.title = element_text(size = 6.5),  
+    legend.text = element_text(size = 5.5),
+  )
+print(p_3)
+```
+
+# Summary line plot
+---------------------------------------------------------------------
+```{r}
+# Extract the rlog data
+rlog_data <- assay(rld$noblind$stages)
+# Define three gene classes - de novo
+class1_genes <- profile_comparison$gene_id[profile_comparison$fine_profile_stages %in% "De novo TX (3-dpf)"]  # Replace with your actual gene list
+class2_genes <- profile_comparison$gene_id[profile_comparison$fine_profile_stages %in% "De novo TX (post-1-hpf)"]  # Replace with your actual gene list
+
+# Define three gene classes - degradation
+class1_genes <- profile_comparison$gene_id[profile_comparison$fine_profile_stages %in% "Degradation (post-fertilization)"]  # Replace with your actual gene list
+class2_genes <- profile_comparison$gene_id[profile_comparison$fine_profile_stages %in% "Gradual degradation (early)"]  # Replace with your actual gene list
+
+# Create a data frame with the average expression and confidence intervals
+df <- data.frame(
+  gene = rownames(rlog_data),
+  condition = rep(colnames(rlog_data), each = nrow(rlog_data)),
+  expression = as.vector(rlog_data)
+)
+
+# Add a class column
+df$class <- ifelse(df$gene %in% class1_genes, "Class 1",
+                          ifelse(df$gene %in% class2_genes, "Class 2", NA))
+
+# Remove rows with NA class
+df <- df %>% filter(!is.na(class))
+df$condition <- gsub(pattern = "^trout_|_A_[1-4]$", replacement = "", x = df$condition)
+
+# Set factor levels and new labels
+df$condition <- factor(df$condition, levels = c("0_hpf", "1_hpf", "1_dpf", "3_dpf"))
+df$condition_label <- recode_factor(df$condition,
+                                    "0_hpf" = "NF\nhpf",
+                                    "1_hpf" = "1\nhpf",
+                                    "1_dpf" = "1\ndpf",
+                                    "3_dpf" = "3\ndpf")
+
+# Calculate mean and confidence intervals
+summary_df <- df %>%
+  group_by(class, condition_label) %>%
+  summarise(
+    mean = mean(expression),
+    ci_lower = mean(expression) - qt(0.975, df=n()-1) * sd(expression)/sqrt(n()),
+    ci_upper = mean(expression) + qt(0.975, df=n()-1) * sd(expression)/sqrt(n())
+  )
+
+# Plot using ggplot2
+p_4<- ggplot(summary_df, aes(x = condition_label, y = mean, group = class, color = class)) +
+  geom_line(size = 0.5) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper, fill = class), alpha = 0.2, color = NA) +  # Remove ribbon border
+  labs(
+    title = "Summary gene expression for \nde novo transcription",
+    y = "Expression (vst)",
+    x = ""
+  ) +
+  scale_color_manual(
+    name = "",
+    values = c("Class 1" = "#f7a3d0", "Class 2" = "#8c1c63"),
+    limits = c("Class 1", "Class 2"),  # Specify the order here
+    labels = c("Class 1" = "Class 1 (n=512)",  # Change legend text
+               "Class 2" = "Class 2 (n=84)")
+  ) +
+  scale_fill_manual(
+    name = "",
+    values = c("Class 1" = "#f7a3d0", "Class 2" = "#8c1c63"),
+    limits = c("Class 1", "Class 2"),  # Specify the order here
+    labels = c("Class 1" = "Class 1 (n=512)",  # Change legend text
+               "Class 2" = "Class 2 (n=84)")
+  ) + theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    plot.title = element_text(size = 7, family = "Arial", hjust = 0.2, face = "bold"),
+    text = element_text(family = "Arial"),
+    axis.title = element_text(colour = "black", size = 7),
+    axis.text.x = element_text(colour = "black", size = 7, angle = 0, hjust = 0.4),
+    axis.text.y = element_text(colour = "black", size = 7),
+    axis.line = element_line(size = 0.5, colour = "black"),
+    legend.position = "bottom",          # Move legend below the graph
+    legend.justification = c(0, 0),       # Align legend to the bottom-left
+    legend.text = element_text(colour="black", size = 5.5, face="plain"), 
+    legend.title = element_text(colour="black", size = 6.5, face="plain")
+  )
+
+
+
+p_6 <- ggplot(summary_df, aes(x = condition_label, y = mean, group = class, color = class)) +
+  geom_line(size = 0.5) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper, fill = class), alpha = 0.2, color = NA) +  # Remove ribbon border
+  labs(
+    title = "Summary gene expression for \ndegradation",
+    y = "Expression (vst)",
+    x = ""
+  ) +
+  scale_color_manual(
+    name = "",
+    values = c("Class 1" = "#b3c1e6", "Class 2" = "#2f3e75"),
+    limits = c("Class 1", "Class 2"),  # Specify the order here
+    labels = c("Class 1" = "Class 1 (n=24)",  # Change legend text
+               "Class 2" = "Class 2 (n=62)")
+  ) +
+  scale_fill_manual(
+    name = "",
+    values = c("Class 1" = "#b3c1e6", "Class 2" = "#2f3e75"),
+    limits = c("Class 1", "Class 2"),  # Specify the order here
+    labels = c("Class 1" = "Class 1 (n=24)",  # Change legend text
+               "Class 2" = "Class 2 (n=62)")
+    )+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        plot.title = element_text(size = 7, family = "Arial", hjust = 0.2, face = "bold"),
+        text = element_text(family = "Arial"),
+        axis.title = element_text(colour = "black", size = 7),
+        axis.text.x = element_text(colour = "black", size = 7, angle = 0, hjust = 0.4),
+        axis.text.y = element_text(colour = "black", size = 7),
+        axis.line = element_line(size = 0.5, colour = "black"),
+        legend.position = "bottom",          # Move legend below the graph
+        legend.justification = c(0, 0),       # Align legend to the bottom-left
+        legend.text = element_text(colour="black", size = 5.5, face="plain"), 
+        legend.title = element_text(colour="black", size = 6.5, face="plain")
+  )
+
+print(p_4)
+print(p_6)
+```
+
+# Example DLTs
+---------------------------------------------------------------------
+```{r}
+unique(profile_comparison$gene_id[
+  profile_comparison$fine_profile_stages == "Gradual degradation (early)"
+])
+
+# example gene for de novo transcription
+p_5 <- graph_TOMO_stage_boxplot(gene = "gata5")
+print(p_5)
+
+# example gene for degradation
+p_7 <- graph_TOMO_stage_boxplot(gene = "zar1l")
+print(p_7)
+```
+
+# Patchwork
+```{r, fig.width=17, fig.height=16}
+
+# Combine p_1 and p_2 block
+top_block <- p_1 + labs(tag = "A", title = 'Total transcript alteration') +
+  p_2 + labs(tag = "B", title = 'Transcript abundance alteration relative to 0 hpa') +
+  plot_layout(design = "
+                          AABB
+                          AABB
+                          ")
+
+# Wrap p_3 and give it a smaller height
+middle_block <- p_3 + labs(tag = "C", title = "Proportion of intronic and intergenic regions in mapped reads") 
+
+bottom_block <- (
+  (p_4 + labs(tag = "D") + p_5)  | (p_6 + labs(tag = "E") + p_7)
+) +
+  theme(plot.tag.position = "topleft")
+
+# Full patchwork
+patchwork <- top_block / middle_block / bottom_block +
+  plot_layout(heights = c(2, 1.5, 1.1)) &
+  theme(
+    plot.tag = element_text(size = 9, face = "bold"),
+    plot.title = element_text(
+      family = "Arial",
+      face = "bold",
+      size = 7,
+      hjust = 0.5
+    ),
+      legend.text = element_text(size = 5.5),
+      legend.key.size = unit(0.4, "cm")
+  )
+
+print(patchwork)
+
+ggsave(filename = "figure_01.png", plot = patchwork, dpi = "retina", width = 16.45, height = 15, units = "cm", scale = 1.2)
+```

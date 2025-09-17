@@ -1,0 +1,572 @@
+---
+title: "Manuscript figure: Figure 5"
+author: "Kateřina Šimková & Ravindra Naraine"
+date: "June, 17 2025"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Library
+```{r library}
+library("ComplexHeatmap")
+library("ggplot2")
+library("extrafont")
+library("patchwork")
+library("grid")
+library("ggplotify")
+library("RColorBrewer")
+library("gridExtra")
+library("DESeq2")
+library("stringr")
+library("circlize")
+library("qs2")
+library("cowplot")
+```
+
+# Load workspace
+```{r load particular objects}
+file_path <- "~/objects/"
+
+# Load profile comparison data for trout TOMO-Seq
+# from 05_Orthology.Rmd
+profile_comparison <- qs_read(paste0(file_path, "profile_comparison_3.qs2"),
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# Load DESeqDataSet from Trout TOMO-Seq dataset
+# from 02_Differential_Analysis.Rmd
+ddsTC <- qs_read(paste0(file_path, "ddsTC.qs2"), 
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+```
+
+# Custom functions
+```{r}
+# Function to create text 1
+create_text_1 <- function(lines) {
+  if (length(lines) < 2) stop("Each element of texts must have exactly two parts.")  # Error if not properly formatted
+  
+  ggplot() +
+    # First part
+    annotate(
+      "text",
+      x = 0.5,
+      y = 0.92,  
+      label = stringr::str_wrap(lines[1], width = 16),  # Wrap text for long lines
+      family = "Arial",
+      size = 2.3,
+      color = "#7E0000",
+      hjust = 0.5  
+    ) +
+    # Add a horizontal line
+    geom_segment(
+      aes(x = 0.1, xend = 0.9, y = 0.89, yend = 0.89),
+      color = "black",
+      size = 0.4
+    ) +
+    # Second part
+    annotate(
+      "text",
+      x = 0.5,  
+      y = 0.86, 
+      label = stringr::str_wrap(lines[2], width = 15),  # Wrap text for long lines
+      family = "Arial",
+      size = 2.1,
+      color = "black",
+      hjust = 0.5  
+    ) +
+    xlim(0, 1) +
+    ylim(0.86, 0.95) +
+    theme_void() +
+    theme(
+      plot.margin = unit(c(0, 0, 0, 0), "cm"),
+      panel.background = element_blank(),
+      plot.background = element_blank(),
+      panel.spacing = unit(0, "cm")
+    ) +
+    coord_cartesian(clip = "off")
+}
+
+#Function to create text 2
+create_text_2<- function(lines) {
+  ggplot() +
+    annotate(
+      "text",
+      x = 0.15,
+      y = seq(1, 1 - 0.05 * (length(lines) - 1), by = -0.05),
+      label = sapply(lines, function(line) eval(parse(text = line))),  # Convert to expression for formatting
+      family = "Arial",
+      size = 2.1,
+      color = "black",
+      hjust = 0.5
+    ) +
+    xlim(0, 0.3) +  
+    ylim(0.6, 1) + 
+    theme_void() +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm"))
+}
+
+#Function for ComplexHeatmap
+section_heatmap_plot <- function(section_profile_name = "profile_name", remove_left_annotation = FALSE, heat_map_width = 10){
+  temp101 <- profile_comparison[profile_comparison$fine_any_profile_changes %in% section_profile_name,]
+  temp101 <- temp101[,c(5,grep(pattern = "^A_|^B_|^C_|^D_|^E_", x = colnames(temp101)))]
+  rownames(temp101) <- temp101$gene_id
+  temp101 <- temp101[,-c(1)] 
+  
+  my_sample_col <- data.frame("sample" = colnames(temp101))
+  rownames(my_sample_col) <- my_sample_col$sample
+  my_sample_col$stage <- gsub(x = my_sample_col$sample, replacement = "", pattern = "^._")
+  my_sample_col$stage <- factor(my_sample_col$stage, levels = c("0_hpf", "1_hpf", "1_dpf", "3_dpf"))
+  my_sample_col$position <- gsub(x = my_sample_col$sample, replacement = "", pattern = "_.*")
+  my_sample_col <- my_sample_col[,-c(1)]
+  
+  ann_colors = list(
+    stage =  c('0_hpf'="#F8766D", '1_hpf'="#7CAE00", '1_dpf'="#00BFC4", '3_dpf'="#C77CFF"),
+    position =  c("A" = "#9D88C1", "B" = "#CCC8E1", "C" = "#e2ccc0", "D" = "#FED098", "E" = "#F2AB79"))
+  
+  # Create the heatmap with annotation columns
+  row_ha <- rowAnnotation(
+    df = my_sample_col,
+    col = ann_colors,                  # your color mappings
+    simple_anno_size = unit(1, "mm"),  # make it thinner or thicker
+    annotation_name_gp = gpar(fontsize = 0),
+    annotation_legend_param = list(
+      title_gp = gpar(fontsize = 10),
+      labels_gp = gpar(fontsize = 10),
+      legend_height = unit(c(1,1), "cm")
+    ),
+    annotation_name = NULL
+  )
+  
+  temp102 <- t(apply(temp101, 1, function(x) scale(x)))
+  colnames(temp102) <- colnames(temp101)
+  
+  breaksList = seq(-5, 5, by = 0.01)
+  temp300 <- ComplexHeatmap::pheatmap(
+    mat = t(as.matrix(temp102)), 
+    scale = "none", 
+    cluster_rows = FALSE, 
+    cluster_cols = TRUE, 
+    show_rownames = FALSE, 
+    show_colnames = FALSE, 
+    color = colorRampPalette(rev(brewer.pal(n = 7, name = "BrBG")))(length(breaksList)),
+    treeheight_row = 0, 
+    treeheight_col = 0, 
+    left_annotation = row_ha,
+    show_row_dend = FALSE,
+    show_column_dend = FALSE,
+    row_split = as.factor(my_sample_col$stage),  # Keeps grouping but without visible titles
+    fontsize = 7, 
+    column_title = NULL,  
+    row_title = NULL,
+    name = NULL,
+    fontfamily = "Arial",
+    legend = FALSE,         
+    annotation_legend = FALSE,
+    breaks = breaksList, 
+    use_raster = FALSE, 
+    border = NA
+  )
+  
+  # Remove the left annotation from `temp300`
+  if(remove_left_annotation == TRUE){
+    temp300@left_annotation <- NULL
+  }
+  
+  # control how wide the heatmap is
+  temp300@heatmap_param$width  <- grid::unit(heat_map_width, "cm")
+  
+  return(temp300)
+}
+
+#Function for example transcripts
+graph_TOMO_counts_noscaledy <- function(gene = "enter gene_id", point_size = 2, line_size = 0.5) {
+  data <- plotCounts(ddsTC$full_profile_changes, gene = gene, intgroup = c("Position", "sample_id", "Stage"), returnData = TRUE)
+  
+  gene_title <- profile_comparison$zebrafish_human[toupper(profile_comparison$gene_id) %in% toupper(gene)]
+  plot_title <- bquote("Example: " * italic(.(gene_title)))
+  
+  y_min <- floor(min(data$count))
+  y_max <- ceiling(max(data$count))
+  y_breaks <- seq(y_min, y_max, length.out = 4)
+  
+  ggplot(data,
+         aes(x = Position, y = count, color = Stage, group = Stage)) + 
+    geom_point(size = point_size) +
+    geom_smooth(se = FALSE, method = "loess", size = line_size) +  # <-- line thickness
+    ggtitle(plot_title) +
+    scale_y_continuous(
+      breaks = y_breaks,
+      labels = round(y_breaks, -2)
+    ) +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.border = element_blank(),
+      panel.background = element_blank(),
+      plot.title = element_text(size = 6, family = "Arial", hjust = 0.5, face = "plain"),
+      text = element_text(family = "Arial"),
+      axis.title = element_text(colour = "black", size = 6, face = "plain"),
+      axis.text.x = element_text(colour = "black", size = 5, face = "plain", angle = 0, hjust = 0.4),
+      axis.text.y = element_text(colour = "black", size = 5, face = "plain"),
+      axis.line = element_line(size = 0.3, colour = "black"),
+      legend.position = "none"
+    )
+}
+```
+# Table of DLTs
+```{r}
+# 0_hpf - course profile
+name1 = "0_hpf"
+temp <- profile_comparison[[paste0("course_profile_", name1)]][(profile_comparison[[paste0("deseq_", name1, "_change")]] %in% TRUE) & !is.na(profile_comparison[[paste0("course_profile_", name1)]])]
+table(temp)
+sum(table(temp))
+
+# 0_hpf - fine profile
+name1 = "0_hpf"
+temp <- profile_comparison$profile_0_hpf[(profile_comparison[[paste0("deseq_", name1, "_change")]] %in% TRUE) & !is.na(profile_comparison[[paste0("course_profile_", name1)]])]
+table(temp)
+sum(table(temp))
+
+# 1_hpf - course profile
+name1 = "1_hpf"
+temp <- profile_comparison[[paste0("course_profile_", name1)]][(profile_comparison[[paste0("deseq_", name1, "_change")]] %in% TRUE) & !is.na(profile_comparison[[paste0("course_profile_", name1)]])]
+table(temp)
+sum(table(temp))
+
+# 1_hpf - fine profile
+name1 = "1_hpf"
+temp <- profile_comparison$profile_1_hpf[(profile_comparison[[paste0("deseq_", name1, "_change")]] %in% TRUE) & !is.na(profile_comparison[[paste0("course_profile_", name1)]])]
+table(temp)
+sum(table(temp))
+
+# 1_dpf
+name1 = "1_dpf"
+temp <- profile_comparison[[paste0("course_profile_", name1)]][(profile_comparison[[paste0("deseq_", name1, "_change")]] %in% TRUE) & !is.na(profile_comparison[[paste0("course_profile_", name1)]])]
+table(temp)
+sum(table(temp))
+
+# 1_dpf - fine profile
+name1 = "1_dpf"
+temp <- profile_comparison$profile_1_dpf[(profile_comparison[[paste0("deseq_", name1, "_change")]] %in% TRUE) & !is.na(profile_comparison[[paste0("course_profile_", name1)]])]
+table(temp)
+sum(table(temp))
+
+# 3_dpf
+name1 = "3_dpf"
+temp <- profile_comparison[[paste0("course_profile_", name1)]][(profile_comparison[[paste0("deseq_", name1, "_change")]] %in% TRUE) & !is.na(profile_comparison[[paste0("course_profile_", name1)]])]
+table(temp)
+sum(table(temp))
+
+# 3_dpf - fine profile
+name1 = "3_dpf"
+temp <- profile_comparison$profile_3_dpf[(profile_comparison[[paste0("deseq_", name1, "_change")]] %in% TRUE) & !is.na(profile_comparison[[paste0("course_profile_", name1)]])]
+table(temp)
+sum(table(temp))
+
+#Image to ggplot
+img <- png::readPNG(file.path(file_path, "figure_05/table.png"))
+img_grob <- rasterGrob(img, interpolate = TRUE)
+
+p_1 <- ggplot() +
+  annotation_custom(img_grob, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  xlim(0, 10) + ylim(0, 10) +
+  theme_void() +
+  theme(plot.margin = unit(c(0, 0, 0, 0), "cm"))  # Remove all margins
+print(p_1)
+```
+
+# Text 1
+```{r fig.width=10, fig.height=10}
+texts <- list(
+  list("Vegetal (all stages)", "Number of genes: 1148"),
+  list("Vegetal (3-dpf)", "Number of genes: 421"),
+  list("Vegetal to Animal", "Number of genes: 92"),
+  list("Vegetal (early)", "Number of genes: 21"),
+  list("Extreme vegetal (post-1-hpf)", "Number of genes: 190"),
+  list("Animal (all stages)", "Number of genes: 657"),
+  list("Extreme animal (3-dpf)", "Number of genes: 2667"),
+  list("Extreme animal (early)", "Number of genes: 326"),
+  list("Extreme animal to vegetal", "Number of genes: 143")
+)
+
+# Create each plot
+plots <- lapply(texts, create_text_1)
+
+spacer <- plot_spacer() + plot_layout(widths = unit(0.5, "mm"))  # Small spacer
+plots_with_gaps <- lapply(plots, function(p) list(p, spacer))
+plots_with_gaps <- do.call(c, plots_with_gaps)
+plots_with_gaps <- plots_with_gaps[-length(plots_with_gaps)]  # remove last spacer
+
+p_2 <- wrap_plots(plots_with_gaps, nrow = 1)
+
+print(p_2)
+```
+
+# Complex heatmap
+```{r, fig.width=20, fig.height=15}
+section_profile_name = "Animal (all stages)"
+sectional_profile_graphs <- list()
+
+for(name1 in c("Animal (all stages)", "Extreme animal (3-dpf)", 
+               "Vegetal to Animal", "Extreme animal (early)", 
+               "Extreme vegetal (post-1-hpf)", "Extreme animal to vegetal", 
+               "Vegetal (3-dpf)", "Vegetal (all stages)", "Vegetal (early)")){
+  if(name1 == "Vegetal (all stages)"){
+    sectional_profile_graphs[[paste0(name1)]] <- section_heatmap_plot(section_profile_name = name1, 
+                                                                      remove_left_annotation = FALSE, 
+                                                                      heat_map_width = 2.25)
+  }else{
+    sectional_profile_graphs[[paste0(name1)]] <- section_heatmap_plot(section_profile_name = name1, 
+                                                                      remove_left_annotation = TRUE, 
+                                                                      heat_map_width = 2.05)
+  }
+}
+
+ht_combined <- sectional_profile_graphs$`Vegetal (all stages)` + sectional_profile_graphs$`Vegetal (3-dpf)` +
+  sectional_profile_graphs$`Vegetal to Animal` + sectional_profile_graphs$`Vegetal (early)` + 
+  sectional_profile_graphs$`Extreme vegetal (post-1-hpf)` + 
+  sectional_profile_graphs$`Animal (all stages)` + sectional_profile_graphs$`Extreme animal (3-dpf)` + 
+  sectional_profile_graphs$`Extreme animal (early)` + sectional_profile_graphs$`Extreme animal to vegetal`
+
+p_3 <- grid.grabExpr(print(ComplexHeatmap::draw(ht_combined, ht_gap = unit(1, "mm"),
+                                                    show_heatmap_legend = FALSE, show_annotation_legend = FALSE, 
+                                                    padding = unit(c(0, 2, 0, 2), "mm"))))
+p_3 <- as.ggplot(p_3)
+print(p_3)
+```
+
+# RNA-seq examples
+```{r fig.width=15, fig.height=2}
+# normalized counts without scaled y axis - position
+# Generate the plot
+{
+temp1 <- graph_TOMO_counts_noscaledy(gene = "dazl", point_size = 0.4, line_size = 0.3)
+temp2 <- graph_TOMO_counts_noscaledy(gene = "LOC110486372", point_size = 0.4, line_size = 0.3)
+temp3 <- graph_TOMO_counts_noscaledy(gene = "LOC110486084", point_size = 0.4, line_size = 0.3)
+temp4 <- graph_TOMO_counts_noscaledy(gene = "LOC110527092", point_size = 0.4, line_size = 0.3)
+temp5 <- graph_TOMO_counts_noscaledy(gene = "LOC110492634", point_size = 0.4, line_size = 0.3)
+temp6 <- graph_TOMO_counts_noscaledy(gene = "LOC110522100", point_size = 0.4, line_size = 0.3)
+temp7 <- graph_TOMO_counts_noscaledy(gene = "LOC110535310", point_size = 0.4, line_size = 0.3)
+temp8 <- graph_TOMO_counts_noscaledy(gene = "cdca9", point_size = 0.4, line_size = 0.3)
+temp9 <- graph_TOMO_counts_noscaledy(gene = "bmp2k", point_size = 0.4, line_size = 0.3)
+
+
+# Remove axis titles for all plots except the first one
+temp2 <- temp2 + theme(axis.title.y = element_blank())
+temp3 <- temp3 + theme(axis.title.y = element_blank())
+temp4 <- temp4 + theme(axis.title.y = element_blank())
+temp5 <- temp5 + theme(axis.title.y = element_blank())
+temp6 <- temp6 + theme(axis.title.y = element_blank())
+temp7 <- temp7 + theme(axis.title.y = element_blank())
+temp8 <- temp8 + theme(axis.title.y = element_blank())
+temp9 <- temp9 + theme(axis.title.y = element_blank())
+}
+
+# Combine the plots with Patchwork
+
+p_4 <- list(temp1, temp2, temp3, temp4, temp5, temp6, temp7, temp8, temp9)
+
+p_4 <- wrap_plots(p_4, nrow = 1) +
+  plot_layout(ncol = 9, widths = rep(1, 9)) & 
+  theme(aspect.ratio = 1,
+        plot.margin = margin(2, 8, 2, 1))  
+
+print(p_4)
+```
+
+# Text 2
+```{r fig.width=15, fig.height=5}
+# Text for each plot as a list of expression-ready lines
+texts <- list(
+  c(
+    'expression(paste("• Germ cell"))',
+    'expression(paste("specification"))',
+    'expression(paste("(", italic("dazl"), ", ", italic("grip2b"), ")"))',
+    'expression(paste("• Cell cycle regulation"))',
+    'expression(paste("& proliferation"))',
+    'expression(paste("(", italic("ccnb1"), ", ", italic("ccna2"), ")"))'
+  ),
+  c(
+    'expression(paste("• Epigenetic control"))',
+    'expression(paste("(", italic("dnmt1"), ", ", italic("uhrf1"), ")"))',
+    'expression(paste("• Metabolism"))',
+    'expression(paste("(", italic("slc25a51b"), ", ", italic("samm50"), ")"))'
+  ),
+  c(
+    'expression(paste("• Translation &"))',
+    'expression(paste("ribosome"))',
+    'expression(paste("(", italic("pabpn1"), ", ", italic("mrto4"), ")"))',
+    'expression(paste("• RNA regulation"))',
+    'expression(paste("(", italic("eif4a3 "), ", ", italic("alyref"), ")"))'
+  ),
+  c(
+    'expression(paste("• Signaling"))',
+    'expression(paste("(", italic("mapk6"), ")"))',
+    'expression(paste("• RNA regulation"))',
+    'expression(paste("(", italic("zfp36l2"), ")"))'
+  ),
+  c(
+    'expression(paste("• Cell polarity &"))',
+    'expression(paste("axis formation"))',
+    'expression(paste("(", italic("pard6b"), ", ", italic("fzd1"), ")"))',
+    'expression(paste("• Signal transduction"))',
+    'expression(paste("(", italic("rit1"), ", ", italic("pik3c2b"), ")"))'
+  ),
+   c(
+    'expression(paste("• Cytoskeleton"))',
+    'expression(paste("(", italic("actb1"), ", ", italic("tubb2"), ")"))',
+    'expression(paste("• Cell cycle process"))',
+    'expression(paste("(", italic("bub1"), ", ", italic("atm"), ")"))'
+  ),
+  c(
+    'expression(paste("• Endoderm &"))',
+    'expression(paste("mesoderm"))',
+    'expression(paste("(", italic("foxh1"), ", ", italic("tbx16"), ")"))',
+    'expression(paste("• Ectoderm & neurons"))',
+    'expression(paste("(", italic("foxi1"), ", ", italic("sox3"), ")"))',
+    'expression(paste("• Translation"))',
+    'expression(paste("(", italic("rpl3"), ", ", italic("eef1e1"), ")"))',
+    'expression(paste("• Body axis"))',
+    'expression(paste("(", italic("wnt11"), ", ", italic("bmp4"), ")"))'
+  ),
+  c(
+    'expression(paste("• Cell cycle regulation"))',
+    'expression(paste("(", italic("spc24"), ", ", italic("cdca9"), ")"))',
+    'expression(paste("• Signaling"))',
+    'expression(paste("(", italic("jag1b"), ", ", italic("tgfbr2b "), ")"))'
+  ),
+  c(
+    'expression(paste("• Trafficking"))',
+    'expression(paste("(", italic("rab7"), ", ", italic("slc44a1b"), ")"))',
+    'expression(paste("• Signaling"))',
+    'expression(paste("(", italic("grb2a"), ", ", italic("bmp2k"), ")"))'
+  )
+)
+
+create_text_2(texts[[1]])
+
+# Create each plot
+plots <- lapply(texts, create_text_2)
+
+# Combine all plots in a single row layout
+layout_2 <- "ABCDEFGHI"
+p_5 <- wrap_plots(plots, design = layout_2)
+print(p_5)
+```
+
+# Legend
+```{r}
+# Colors
+ann_colors = list(
+    stage =  c('0_hpf'="#F8766D", '1_hpf'="#7CAE00", '1_dpf'="#00BFC4", '3_dpf'="#C77CFF"),
+    position =  c("A" = "#9D88C1", "B" = "#CCC8E1", "C" = "#e2ccc0", "D" = "#FED098", "E" = "#F2AB79"))
+
+# Create the annotation legend for stages
+annotation_legend_stages <- Legend(
+  title = "Stage",
+  labels = gsub(pattern = "_", replacement = " ", x = names(ann_colors$stage)),
+  legend_gp = gpar(fill = unname(ann_colors$stage)),  # Provide colors for the legend
+  title_gp = gpar(fontsize = 6.5),
+  labels_gp = gpar(fontsize = 5.5),
+  grid_height = unit(0.2, "cm"),
+  grid_width = unit(0.3, "cm"),
+  direction = "horizontal", nrow = 1  # Horizontal layout
+)
+
+# Create the annotation legend for positions
+annotation_legend_position <- Legend(
+  title = "Position",
+  labels = names(ann_colors$position),
+  legend_gp = gpar(fill = unname(ann_colors$position)),  # Provide colors for the legend
+  title_gp = gpar(fontsize = 6.5),
+  labels_gp = gpar(fontsize = 5.5),
+  grid_height = unit(0.2, "cm"),
+  grid_width = unit(0.3, "cm"),
+  direction = "horizontal", nrow = 1  # Horizontal layout
+)
+
+# Define the breaks for the color gradient
+breaksList <- seq(-5, 5, by = 0.01)
+
+# Create the heatmap legend
+heatmap_legend <- Legend(
+  title = "z-score",
+  col_fun = colorRamp2(
+    breaks = c(-5, -3, -1, 1, 3, 5),  # Use only the major breaks (-5, 0, 5)
+    colors = colorRampPalette(rev(brewer.pal(n = 7, name = "BrBG")))(6)  # Match colors to breaks
+  ),
+  at = c(-5, -3, -1, 1, 3, 5),  # Major tick positions
+  labels = c("-5", "-3", "-1", "1", "3", "5"),  # Major tick labels
+  title_gp = gpar(fontsize = 6.),
+  labels_gp = gpar(fontsize = 5.5),
+  grid_height = unit(0.2, "cm"),  # Height of the gradient bar
+  grid_width = unit(0.2, "cm"),  # Width of the gradient bar
+  direction = "horizontal",  # Horizontal orientation
+  tick_length = unit(0.1, "cm")  # Shorter ticks for better alignment
+)
+
+# Combine all legends into a single layout
+legend_list <- packLegend(
+  annotation_legend_stages,
+  annotation_legend_position,
+  heatmap_legend,
+  direction = "horizontal",  # Combine legends horizontally
+  column_gap = unit(1, "cm")  # Add spacing between legends
+)
+
+p_6 <- as.ggplot(grid.grabExpr(draw(legend_list)))
+p_6 <- ggdraw() + draw_grob(grid.grabExpr(draw(legend_list)))
+
+print(p_6)
+```
+
+# Patchwork
+```{r fig.width=17, fig.height=16}
+layout_3<- "
+AAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAA
+BBBBBBBBBBBBBBBBBBBBBB
+CCCCCCCCCCCCCCCCCCCCCC
+CCCCCCCCCCCCCCCCCCCCCC
+CCCCCCCCCCCCCCCCCCCCCC
+CCCCCCCCCCCCCCCCCCCCCC
+CCCCCCCCCCCCCCCCCCCCCC
+DDDDDDDDDDDDDDDDDDDDDD
+DDDDDDDDDDDDDDDDDDDDDD
+EEEEEEEEEEEEEEEEEEEEEE
+EEEEEEEEEEEEEEEEEEEEEE
+FFFFFFFFFFFFFFFFFFFFFF
+"
+
+patchwork <- 
+  (wrap_elements(p_1) + labs(tag = "A", title = 'Number of DLTs in individual categories per stage')) + 
+  (wrap_elements(full = p_2) + labs(tag = "B", title = 'Heatmaps for animal and vegetal sub-profiles')) + 
+  (wrap_elements(p_3) + labs(tag = "")) +  
+  (wrap_elements(full = p_4) + 
+  labs(tag = "C") +
+  theme(plot.margin = unit(c(0, 0, 0, -0.7), "cm")  
+  )) +
+  (wrap_elements(full =p_5) + labs(tag = "D")) + 
+  (wrap_elements(full = p_6) + labs(tag = "")) +  
+  plot_layout(
+    design = layout_3
+  ) &
+  theme(
+    plot.margin = unit(c(0, 0, 0, 0), "cm"),
+    plot.spacing = unit(0, "cm"),  # Remove space between patches
+    panel.spacing = unit(0, "cm"),  # Ensure panels within patches are also close
+    plot.title = element_text(
+      family = "Arial", 
+      face = "bold",    
+      size = 7,       
+      hjust = 0.5      
+    ),
+    plot.tag = element_text(size = 9, face = "bold")
+  )
+
+print(patchwork)
+
+ggsave(filename = "figure_05.png", plot = patchwork, dpi = "retina", width = 16.45, height = 16.4, units = "cm", scale = 1.2)
+```

@@ -1,0 +1,772 @@
+---
+title: "Manuscript figure: Figure 3"
+author: "Kateřina Šimková & Ravindra Naraine"
+date: "June, 09 2025"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Library
+```{r library}
+library("patchwork")
+library("qs2")
+library("extrafont")
+library("dplyr")
+library("tidyverse")
+library("UpSetR")
+library("ComplexUpset")
+library("gprofiler2")
+library("ggtext")
+```
+
+# Load workspace
+```{r load particular objects}
+file_path <- "~/objects/"
+
+# Load profile comparison for hybrid trout
+# from 05_Orthology.Rmd
+profile_comparison_hybrid<- qs_read(file.path(file_path, "profile_comparison_hybrid.qs2"),
+                                validate_checksum = TRUE,
+                                nthreads = parallel::detectCores()-1)
+
+# Load zebrafish datasets 
+# https://pubmed.ncbi.nlm.nih.gov/36757845/
+zebrafish_Bhat <- qs_read(file.path(file_path, "zebrafish_Bhat.qs2"), 
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# https://pubmed.ncbi.nlm.nih.gov/24440719/
+zebrafish_Heyn <- qs_read(file.path(file_path, "zebrafish_Heyn.qs2"), 
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+```
+
+# Custom functions
+```{r}
+## Euler venn diagram to ggplot2 
+ggeulerr <- function(combinations, 
+                     show_quantities = TRUE, 
+                     show_labels = TRUE, 
+                     font_size = 3,                   
+                     font_family = "Arial",            
+                     custom_colors = NULL,            
+                     ...) {
+  data <-
+    eulerr::euler(combinations = combinations) %>%
+    plot(quantities = show_quantities) %>%
+    pluck("data")
+  
+  tibble() %>%
+    ggplot() +
+    ggforce::geom_ellipse(
+      data = data$ellipses %>% as_tibble(rownames = "Set"),
+      mapping = aes(x0 = h, y0 = k, a = a, b = b, angle = 0, fill = Set),
+      alpha = 0.5
+    ) +
+    geom_text(
+      data = {
+        data$centers %>%
+          mutate(
+            label = labels %>% map2(quantities, ~ {
+              if (!is.na(.x) && !is.na(.y) && show_labels) {
+                paste0(.x, "\n", format(.y, scientific = FALSE))  # Format quantity as a regular number
+              } else if (!is.na(.x) && show_labels) {
+                .x
+              } else if (!is.na(.y)) {
+                format(.y, scientific = FALSE)  # Format quantity only
+              } else {
+                ""
+              }
+            })
+          )
+      },
+      mapping = aes(x = x, y = y, label = label),
+      size = font_size,         # Adjust font size
+      family = font_family     # Set font family
+    ) +
+    theme(panel.grid = element_blank()) +
+    coord_fixed() +
+    scale_fill_manual(values = custom_colors %||% ggplot2::scale_fill_viridis_d())
+}
+```
+
+# Hybrid trout: Distribution of maternal to paternal
+```{r section A-paternal versus maternal}
+profile_comparison_a <- profile_comparison_hybrid[profile_comparison_hybrid$section %in% "a",]
+profile_comparison_b <- profile_comparison_hybrid[profile_comparison_hybrid$section %in% "b",]
+
+df_long_section_a <- profile_comparison_a %>%
+  pivot_longer(
+    cols = starts_with("Stage_"),       # or matches("_vs_0_hpa$")
+    names_to = "comparison") %>%
+  mutate(genome = recode(genome,
+                         "genome1" = "Maternal",
+                         "genome2" = "Paternal"))
+names(df_long_section_a)[16] <- "status"
+df_long_section_a$status <- gsub(pattern = "denovo", replacement = "De novo", x = df_long_section_a$status)
+df_long_section_a$status <- gsub(pattern = "degrade", replacement = "Degradation", x = df_long_section_a$status)
+df_long_section_a$status <- factor(df_long_section_a$status)
+df_long_section_a$comparison <- gsub(pattern = "_vs.*|^Stage_", replacement = "", x = df_long_section_a$comparison)
+df_long_section_a$comparison <- gsub(pattern = "_", replacement = " ", x = df_long_section_a$comparison)
+df_long_section_a$comparison <- factor(df_long_section_a$comparison, levels = unique(df_long_section_a$comparison))
+
+df_counts_section_a_denovo <- df_long_section_a %>%
+  filter(!is.na(status), status == "De novo") %>%
+  dplyr::count(comparison, genome)
+
+temp3_section_a_denovo <- df_counts_section_a_denovo %>%
+  ggplot(aes(x = comparison, y = n, fill = genome)) +
+  geom_bar(stat = "identity", position = "stack", alpha = 0.7) +
+  geom_text(
+    aes(
+      label = ifelse(comparison == "3 dpf", n, NA),
+      vjust = ifelse(genome == "Maternal", 1.2, 1.5)
+    ),
+    position = position_stack(),
+    size = 2,
+    family = "Arial"
+  ) +
+  labs(
+    x = NULL,
+    y = "# of transcripts",
+    fill = NULL,
+    colour = "Stage"
+  ) +
+  scale_fill_manual(values = c(
+    "Maternal" = "#E17C05",
+    "Paternal"  = "#1F78B4"
+  )) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    text = element_text(family = "Arial"),
+    axis.title = element_text(colour = "black", size = 7, face = "plain"),
+    axis.text.x = element_text(colour = "black", size = 7, face = "plain"),
+    axis.text.y = element_text(colour = "black", size = 7, face = "plain"),
+    axis.line = element_line(linewidth = 0.5, colour = "black"),
+    legend.position = "right", 
+    legend.text = element_text(colour = "black", size = 5.5, face = "plain"), 
+    legend.title = element_text(colour = "black", size = 6.5, face = "plain")
+  )
+
+temp3_section_a_degrade <- df_long_section_a %>%
+  filter(!is.na(status),
+         status == "Degradation") %>%
+  ggplot(aes(x = comparison, fill = genome)) +
+  geom_bar(position = "stack", alpha = 0.7) +
+  labs(
+    x = NULL,
+    y = "# of transcripts",
+    fill = NULL,
+    colour = "Stage"
+  ) +
+  scale_fill_manual(values = c(
+    "Maternal" = "#E17C05",
+    "Paternal"  = "#1F78B4"
+  )) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        text = element_text(family = "Arial"),
+        axis.title = element_text(colour = "black", size = 7, face = "plain"),
+        axis.text.x = element_text(colour = "black", size = 7, face = "plain"),
+        axis.text.y = element_text(colour = "black", size = 7, face = "plain"),
+        axis.line = element_line(linewidth = 0.5, colour = "black"),
+        legend.position = "right", 
+        legend.text = element_text(colour = "black", size = 5.5, face = "plain"), 
+        legend.title = element_text(colour = "black", size = 6.5, face = "plain"))
+``` 
+```{r section B-paternal versus maternal}
+df_long_section_b <- profile_comparison_b %>%
+  pivot_longer(
+    cols = starts_with("Stage_"),       # or matches("_vs_0_hpa$")
+    names_to = "comparison") %>%
+  mutate(genome = recode(genome,
+                         "genome1" = "Maternal",
+                         "genome2" = "Paternal"))
+names(df_long_section_b)[16] <- "status"
+df_long_section_b$status <- gsub(pattern = "denovo", replacement = "De novo", x = df_long_section_b$status)
+df_long_section_b$status <- gsub(pattern = "degrade", replacement = "Degradation", x = df_long_section_b$status)
+df_long_section_b$status <- factor(df_long_section_b$status)
+df_long_section_b$comparison <- gsub(pattern = "_vs.*|^Stage_", replacement = "", x = df_long_section_b$comparison)
+df_long_section_b$comparison <- gsub(pattern = "_", replacement = " ", x = df_long_section_b$comparison)
+df_long_section_b$comparison <- factor(df_long_section_b$comparison, levels = unique(df_long_section_b$comparison))
+
+temp3_section_b_denovo <- df_long_section_b %>%
+  filter(!is.na(status),
+         status == "De novo") %>%
+  ggplot(aes(x = comparison, fill = genome)) +
+  geom_bar(position = "stack", alpha = 0.7) +
+  labs(
+    x = NULL,
+    y = "# of transcripts",
+    fill = NULL,
+    colour = "Stage"
+  ) +
+  scale_fill_manual(values = c(
+    "Maternal" = "#E17C05",
+    "Paternal"  = "#1F78B4"
+  )) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        text = element_text(family = "Arial"),
+        axis.title = element_text(colour = "black", size = 7, face = "plain"),
+        axis.text.x = element_text(colour = "black", size = 7, face = "plain"),
+        axis.text.y = element_text(colour = "black", size = 7, face = "plain"),
+        axis.line = element_line(linewidth = 0.5, colour = "black"),
+        legend.position = "right", 
+        legend.text = element_text(colour = "black", size = 5.5, face = "plain"), 
+        legend.title = element_text(colour = "black", size = 6.5, face = "plain"))
+
+
+temp3_section_b_degrade <- df_long_section_b %>%
+  filter(!is.na(status),
+         status == "Degradation") %>%
+  ggplot(aes(x = comparison, fill = genome)) +
+  geom_bar(position = "stack", alpha = 0.7) +
+  labs(
+    x = NULL,
+    y = "# of transcripts",
+    fill = NULL,
+    colour = "Stage"
+  ) +
+  scale_fill_manual(values = c(
+    "Maternal" = "#E17C05",
+    "Paternal"  = "#1F78B4"
+  )) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        text = element_text(family = "Arial"),
+        axis.title = element_text(colour = "black", size = 7, face = "plain"),
+        axis.text.x = element_text(colour = "black", size = 7, face = "plain"),
+        axis.text.y = element_text(colour = "black", size = 7, face = "plain"),
+        axis.line = element_line(linewidth = 0.5, colour = "black"),
+        legend.position = "right", 
+        legend.text = element_text(colour = "black", size = 5.5, face = "plain"), 
+        legend.title = element_text(colour = "black", size = 6.5, face = "plain"))
+``` 
+```{r fig.width=15, fig.height=7}
+plot_a1 <- temp3_section_a_denovo + 
+  labs(title = 'Animal section', subtitle = expression(italic("De novo")))
+
+plot_a2 <- temp3_section_a_degrade + 
+  labs(title = 'Animal section', subtitle = "Degradation")
+
+plot_b1 <- temp3_section_b_denovo + 
+  labs(title = 'Vegetal section', subtitle = expression(italic("De novo")))
+
+plot_b2 <- temp3_section_b_degrade + 
+  labs(title = 'Vegetal section', subtitle = "Degradation")
+
+# Compose the final layout
+p_1 <- (plot_a1 + plot_a2 + plot_b1 + plot_b2) +
+  plot_layout(ncol = 4, guides = "collect") & 
+  theme(
+    plot.tag = element_text(size = 9, face = "bold"),
+    plot.title = element_text(
+      family = "Arial",
+      face = "bold",    
+      size = 7,        
+      hjust = 0.5
+    ),
+    plot.subtitle = element_text(
+      family = "Arial",
+      face = "plain", 
+      size = 7,
+      hjust = 0.5
+    ),
+    legend.text = element_text(size = 5.5),
+    legend.position = "bottom", 
+    legend.key.size = unit(0.4, "cm")
+  )
+
+print(p_1)
+```
+
+# Upset plot - comparison with D. rerio - Bhat et al. 2023 and Heyn et al. 2014
+```{r}
+## Trout
+# Filtering trout data
+# Degradation in hybrid trout
+degradation_trout_hybrid <- profile_comparison_hybrid %>%
+  filter(
+    (Stage_1_hpf_vs_0_hpf %in% "degrade" |
+       Stage_1_dpf_vs_0_hpf %in% "degrade" |
+       Stage_3_dpf_vs_0_hpf %in% "degrade") &
+      
+      !(Stage_1_hpf_vs_0_hpf %in% "denovo" |
+          Stage_1_dpf_vs_0_hpf %in% "denovo" |
+          Stage_3_dpf_vs_0_hpf %in% "denovo") &
+      
+      !is.na(zebrafish_human)
+  )
+
+degradation_trout <- degradation_trout_hybrid %>%
+  distinct(zebrafish_human, .keep_all = TRUE) 
+
+# Denovo in hybrid trout
+denovo_trout_hybrid <- profile_comparison_hybrid %>%
+  filter(
+    (Stage_1_hpf_vs_0_hpf %in% "denovo" |
+       Stage_1_dpf_vs_0_hpf %in% "denovo" |
+       Stage_3_dpf_vs_0_hpf %in% "denovo") &
+      
+      !(Stage_1_hpf_vs_0_hpf %in% "degrade" |
+          Stage_1_dpf_vs_0_hpf %in% "degrade" |
+          Stage_3_dpf_vs_0_hpf %in% "degrade") &
+      
+      !is.na(zebrafish_human)
+  )
+
+denovo_trout <- denovo_trout_hybrid %>%
+  distinct(zebrafish_human, .keep_all = TRUE)    
+  
+## Zebrafish - Bhat et al. 2023
+denovo_all_Bhat <- zebrafish_Bhat[zebrafish_Bhat$`sub classification` %in% c("MZ increasing", "Z"),]
+degradation_all_Bhat <- zebrafish_Bhat[zebrafish_Bhat$`sub classification` %in% c("MZ decreasing", "M-unstable"),] 
+
+## Zebrafish - Heyn et al. 2014 - only denovo
+zebrafish_Heyn$gene_name_new <- gsub(pattern = " \\(.*", replacement = "", x = zebrafish_Heyn$`Gene name`)
+
+## Unify annotation in all datasets
+temp1 <- list("trout_de_novo_transcription" = denovo_trout$zebrafish_human, 
+              "trout_degradation" = degradation_trout$zebrafish_human, 
+              "zebrafish_degradation_Bhat" = degradation_all_Bhat$`Gene ID`, 
+              "zebrafish_de_novo_Bhat" = denovo_all_Bhat$`Gene ID`, 
+              "zebrafish_de_novo_Heyn" = zebrafish_Heyn$gene_name_new)
+temp1 <- lapply(temp1, function(x) unique(toupper(na.omit(x))))
+lapply(temp1, function(x) length(x))
+
+for(name1 in names(temp1)){
+  write.table(temp1[[name1]], file = paste0(name1, ".txt"), row.names = FALSE, col.names = FALSE, quote = FALSE)
+}
+
+# Ensure standardization of gene symbols: Upload to https://www.ensembl.org/biomart/martview/985cc79ab26ac9ca8edfc6e7e078c3c1 (filter = zfin)
+
+zebrafish_de_novo_Bhat_new<- read.table(file = "Y:/!!Users/RNAseq_data/Archive/01_Tomography/Oncorhynchus_Trout/20220122_development/processed_ravi/new_code_set/figure_02/ensembl_annotation/zebrafish_de_novo_Bhat_new.txt", sep = "\t", header = TRUE, quote = "")
+zebrafish_degradation_Bhat_new<- read.table(file = "Y:/!!Users/RNAseq_data/Archive/01_Tomography/Oncorhynchus_Trout/20220122_development/processed_ravi/new_code_set/figure_02/ensembl_annotation/zebrafish_degradation_Bhat_new.txt", sep = "\t", header = TRUE, quote = "")
+zebrafish_de_novo_Heyn_new<- read.table(file = "Y:/!!Users/RNAseq_data/Archive/01_Tomography/Oncorhynchus_Trout/20220122_development/processed_ravi/new_code_set/figure_02/ensembl_annotation/zebrafish_de_novo_Heyn_new.txt", sep = "\t", header = TRUE, quote = "")
+trout_degradation_new<- read.table(file = "Y:/!!Users/RNAseq_data/Archive/01_Tomography/Oncorhynchus_Trout/20220122_development/processed_ravi/new_code_set/figure_02/ensembl_annotation/trout_degradation_new.txt", sep = "\t", header = TRUE, quote = "")
+trout_de_novo_transcription_new<- read.table(file = "Y:/!!Users/RNAseq_data/Archive/01_Tomography/Oncorhynchus_Trout/20220122_development/processed_ravi/new_code_set/figure_02/ensembl_annotation/trout_de_novo_transcription_new.txt", sep = "\t", header = TRUE, quote = "")
+
+list<- list("trout de novo transcription" = unique(toupper(trout_de_novo_transcription_new$Gene.name)),
+            "trout degradation" = unique(toupper(trout_degradation_new$Gene.name)),
+            "zebrafish degradation Bhat" = unique(toupper(zebrafish_degradation_Bhat_new$Gene.name)),
+            "zebrafish de novo Bhat" = unique(toupper(zebrafish_de_novo_Bhat_new$Gene.name)),
+            "zebrafish de novo Heyn" = unique(toupper(zebrafish_de_novo_Heyn_new$Gene.name))
+)
+
+
+# UpSet plot 
+data <- fromList(list)
+data$intersection_label <- apply(data, 1, function(row) {
+  paste(names(row)[which(row == 1)], collapse = "_")
+})   
+
+p_2<- ComplexUpset::upset(
+  data,
+  intersect = c("trout degradation", "trout de novo transcription", "zebrafish degradation Bhat", 
+                "zebrafish de novo Bhat", "zebrafish de novo Heyn"),
+  base_annotations = list(
+    'Intersection size' = intersection_size(counts = FALSE, width = 0.8)
+  ),
+  matrix = intersection_matrix(geom = geom_point(size = 2.1)),  
+  themes=upset_modify_themes(
+    list(
+      'intersections_matrix'=theme(text=element_text(size=8, colour = "black", family = "Arial"), axis.title = element_blank()),
+      'overall_sizes'=theme(text=element_text(size=6, colour = "black", family = "Arial")),
+      'Intersection size'=theme(text=element_text(size=6, colour = "black", family = "Arial"))
+    )
+  ),
+  width_ratio=0.2,
+  set_sizes = (
+    upset_set_size() +
+      scale_y_continuous(breaks = NULL) +
+      theme(
+        axis.text.y = element_blank(),  # Optional: hides set size numbers
+      )
+  ),
+  min_size=20,
+  queries = list(
+    upset_query(
+      intersect = 'trout degradation',
+      color = '#b3c1e6',
+      fill = '#b3c1e6',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      intersect = 'zebrafish degradation Bhat',
+      color = '#b3c1e6',
+      fill = '#b3c1e6',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      intersect = 'trout de novo transcription',
+      color = '#f7a3d0',
+      fill = '#f7a3d0',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      intersect = 'zebrafish de novo Bhat',
+      color = '#f7a3d0',
+      fill = '#f7a3d0',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      intersect = 'zebrafish de novo Heyn',
+      color = '#f7a3d0',
+      fill = '#f7a3d0',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      intersect = c('trout degradation', 'zebrafish degradation Bhat'),
+      color = '#b3c1e6',
+      fill = '#b3c1e6',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      intersect = c('trout de novo transcription', 'zebrafish de novo Bhat'),
+      color = '#f7a3d0',
+      fill = '#f7a3d0',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      intersect = c('trout de novo transcription', 'zebrafish de novo Heyn'),
+      color = '#f7a3d0',
+      fill = '#f7a3d0',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      intersect = c('trout de novo transcription', 'zebrafish de novo Heyn', 'zebrafish de novo Bhat'),
+      color = '#f7a3d0',
+      fill = '#f7a3d0',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      intersect = c('zebrafish de novo Heyn', 'zebrafish de novo Bhat'),
+      color = '#f7a3d0',
+      fill = '#f7a3d0',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      intersect = c('trout de novo transcription', 'trout degradation'),
+      color = '#d9d9d9',
+      fill = '#d9d9d9',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      intersect = c('trout de novo transcription', 'zebrafish degradation Bhat'),
+      color = '#d9d9d9',
+      fill = '#d9d9d9',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      intersect = c('trout de novo transcription', 'zebrafish degradation Bhat', 'trout degradation'),
+      color = '#d9d9d9',
+      fill = '#d9d9d9',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      intersect = c('zebrafish de novo Bhat', 'trout degradation'),
+      color = '#d3e2dd',
+      fill = '#d3e2dd',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      intersect = c('trout de novo transcription', 'zebrafish de novo Bhat', 'trout degradation'),
+      color = '#d3e2dd',
+      fill = '#d3e2dd',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      set = 'trout de novo transcription',
+      fill = '#f7a3d0'
+    ),
+    upset_query(
+      set = 'trout degradation',
+      fill = '#b3c1e6'
+    )
+    ,
+    upset_query(
+      set = 'zebrafish degradation Bhat',
+      fill = '#b3c1e6'
+    )
+    ,
+    upset_query(
+      set = 'zebrafish de novo Bhat',
+      fill = '#f7a3d0'
+    )
+    ,
+    upset_query(
+      set = 'zebrafish de novo Heyn',
+      fill = '#f7a3d0'
+    )
+  )
+)
+
+p_2 <- p_2 +
+  plot_annotation(
+    title = "Transcript level alteration in hybrid trout (this paper) and zebrafish (known data)"
+  ) & 
+  theme(
+    plot.title = element_text(
+      size = 7,
+      family = "Arial",
+      hjust = 0.5,
+      colour = "black",
+      face = "bold"
+    ),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_2)
+```
+
+# GO terms - diagrams
+```{r}
+temp5 <- list()
+temp5[["denovo"]][["multiquery_F"]] <- gost(query = list("zebrafish_de_novo_Bhat"= unique(toupper(zebrafish_de_novo_Bhat_new$Gene.name)),
+                                                         "zebrafish_de_novo_Heyn"= unique(toupper(zebrafish_de_novo_Heyn_new$Gene.name)),
+                                           "trout_de_novo" =  unique(toupper(trout_de_novo_transcription_new$Gene.name))),
+                              ordered_query = FALSE, multi_query = F, 
+                              significant = TRUE, exclude_iea = F,
+                              measure_underrepresentation = FALSE,
+                              evcodes = TRUE, user_threshold = 0.05,
+                              correction_method = "gSCS",
+                              domain_scope = "annotated",
+                              numeric_ns = "ENTREZGENE_ACC")
+
+
+temp5[["denovo"]][["multiquery_T"]] <- gost(query = list("zebrafish_de_novo_Bhat"= unique(toupper(zebrafish_de_novo_Bhat_new$Gene.name)),
+                                                         "zebrafish_de_novo_Heyn"= unique(toupper(zebrafish_de_novo_Heyn_new$Gene.name)),
+                                           "trout_de_novo" =  unique(toupper(trout_de_novo_transcription_new$Gene.name))),
+                                ordered_query = FALSE, multi_query = T, 
+                                significant = TRUE, exclude_iea = F,
+                                measure_underrepresentation = FALSE,
+                                evcodes = TRUE, user_threshold = 0.05,
+                                correction_method = "gSCS",
+                                domain_scope = "annotated",
+                                numeric_ns = "ENTREZGENE_ACC")
+
+temp5[["degradation"]][["multiquery_F"]] <- gost(query = list("zebrafish_degradation_Bhat"= unique(toupper(zebrafish_degradation_Bhat_new$Gene.name)), 
+                                                         "trout_degradation" =  unique(toupper(trout_degradation_new$Gene.name))),
+                                            ordered_query = FALSE, multi_query = F, 
+                                            significant = TRUE, exclude_iea = F,
+                                            measure_underrepresentation = FALSE,
+                                            evcodes = TRUE, user_threshold = 0.05,
+                                            correction_method = "gSCS",
+                                            domain_scope = "annotated",
+                                            numeric_ns = "ENTREZGENE_ACC")
+
+temp5[["degradation"]][["multiquery_T"]] <- gost(query = list("zebrafish_degradation_Bhat"= unique(toupper(zebrafish_degradation_Bhat_new$Gene.name)), 
+                                                         "trout_degradation" =  unique(toupper(trout_degradation_new$Gene.name))),
+                                            ordered_query = FALSE, multi_query = T, 
+                                            significant = TRUE, exclude_iea = F,
+                                            measure_underrepresentation = FALSE,
+                                            evcodes = TRUE, user_threshold = 0.05,
+                                            correction_method = "gSCS",
+                                            domain_scope = "annotated",
+                                            numeric_ns = "ENTREZGENE_ACC")
+
+# Create euler diagram
+# extract p-values for biological process related GO terms
+temp2 <- temp5$denovo$multiquery_F$result #change to degradation or denovo
+
+temp3 <- temp2
+temp3 <- temp3[temp3$source %in% "GO:BP",]
+temp3 <- temp3[temp3$p_value < 0.05,]
+
+#Use degradation or denovo
+temp2_1 <- unique(temp3$term_name[temp3$query %in% "trout_de_novo"])
+temp2_2 <- unique(temp3$term_name[temp3$query %in% "zebrafish_de_novo_Bhat"])
+temp2_3 <- unique(temp3$term_name[temp3$query %in% "zebrafish_de_novo_Heyn"])
+
+temp2_1 <- unique(temp3$term_name[temp3$query %in% "trout_degradation"])
+temp2_2 <- unique(temp3$term_name[temp3$query %in% "zebrafish_degradation_Bhat"])
+
+
+# List of items
+x1 <- list(trout = temp2_1, "zebrafish Bhat" = temp2_2, "zebrafish Heyn" = temp2_3)
+x2 <- list(trout = temp2_1, "zebrafish Bhat" = temp2_2)
+
+#De novo
+p_31 <- x1 %>%
+  ggeulerr(
+    show_labels = FALSE,
+    font_size = 1.3,
+    font_family = "Arial",
+    custom_colors = c("#E88EC5","#F1B9DB","#FAE8F3")
+  ) + 
+  theme_void() +
+  labs(subtitle = expression(italic("De novo") ~ "transcription")) +
+  theme(
+  plot.subtitle = element_text(hjust = 0.5, family = "Arial", size = 7),
+  legend.position = "bottom",
+  legend.title = element_text(size = 6, family = "Arial"),
+  legend.text = element_text(size = 6, family = "Arial"),
+  legend.key.size = unit(0.3, "cm")
+)
+
+print(p_31)
+
+#Degradation
+p_32 <- x2 %>%
+  ggeulerr(
+    show_labels = FALSE,
+    font_size = 1.3,
+    font_family = "Arial",
+    custom_colors = c("#9370DB","#C1B4D9")
+  ) + 
+  theme_void() +
+  labs(subtitle = "Degradation") +
+  theme(
+    plot.subtitle = element_text(hjust = 0.5, family = "Arial", size = 7),
+    legend.position = "bottom", 
+    legend.justification = c(1, 0),
+    legend.title = element_text(size = 6, family = "Arial"),
+    legend.text = element_text(size = 6, family = "Arial"),
+    legend.key.size = unit(0.3, "cm")
+  )
+
+print(p_32)
+
+# Create files for go_compass
+# Store data - denovo or degradation
+temp6 <- temp5$degradation$multiquery_T$result
+temp6 <- temp6[temp6$source %in% "GO:BP",]
+temp6 <- temp6[,c(1,2)]
+
+
+# Use lapply to build a list of data frames, then bind them all at once
+temp6_1<- do.call(rbind, lapply(1:nrow(temp6), function(name1) {
+  data.frame(
+    "GO_ID" = temp6$term_id[name1],
+    "zebrafish_Bhat" = temp6$p_values[[name1]][1],
+    "trout" = temp6$p_values[[name1]][2]
+  )
+}))
+
+temp6_1<- do.call(rbind, lapply(1:nrow(temp6), function(name1) {
+  data.frame(
+    "GO_ID" = temp6$term_id[name1],
+    "zebrafish_Bhat" = temp6$p_values[[name1]][1],
+    "trout" = temp6$p_values[[name1]][2]
+  )
+}))
+
+write.table(x = temp6_1, file = "./trout_zebrafish_degradation_gocompass_terms.tsv", row.names = FALSE, sep = "\t", quote = FALSE)
+
+
+# Create annotation for GO terms
+p_311 <- ggplot() +
+  annotate(
+    "text",
+    x = 0,  # Move text to the left
+    y = 0.95,   # Vertical position
+    label = "
+• negative regulation of 
+  developmental process
+• Wnt signaling pathway
+• cellular response for 
+  growth factor stimulus
+• epithelial tube morphogenesis",
+    family = "Arial",  # Set font to Arial
+    size = 2.1,
+    color = "black",
+    hjust = 0  # Align text to the left
+  ) +
+  xlim(0, 0.15) + ylim(0.85, 1) +  # Set the coordinate limits
+  theme_void() + 
+  theme(
+    plot.margin = unit(c(0, 0, 0, 0), "cm") # Remove all outer margins
+  )
+
+p_322 <- ggplot() +
+  annotate(
+    "text",
+    x = 0.0,  # Move text to the left
+    y = 0.95,   # Vertical position
+    label = "
+
+• sister chromatid segregation
+• embryo development
+• regulation of autophagy
+• regulation of protein stability
+",
+    family = "Arial",  # Set font to Arial
+    size = 2.1,
+    color = "black",
+    hjust = 0  # Align text to the left
+  ) +
+  xlim(0, 0.15) + ylim(0.85, 1) +  # Set the coordinate limits
+  theme_void() +  # Remove all axes, gridlines, and background
+  theme(
+    plot.margin = unit(c(0, 0, 0, 0), "cm") # Remove all outer margins
+  )
+
+# Legend collected only from p_31
+block_1 <- (p_31 + p_311 + plot_layout(ncol = 2, guides = "collect")) &
+  theme(
+    legend.position = "bottom",
+    legend.box.margin = margin(0, 0, 0, 20)
+  )
+
+# Legend collected only from p_32
+block_2 <- (p_32 + p_322 + plot_layout(ncol = 2, guides = "collect")) &
+  theme(
+    legend.position = "bottom",
+    legend.box.margin = margin(0, 0, 0, 20)
+  )
+
+
+# Combine the two blocks
+p_3 <- (block_1 / block_2) +
+  plot_annotation(
+    title = "GO terms enrichment in hybrid trout and zebrafish"
+  ) & 
+  theme(
+    plot.title = element_text(
+      family = "Arial",
+      face ="bold",
+      size = 7,
+      hjust = 0.5
+    )
+  )
+
+print(p_3)
+```
+
+# Patchwork
+```{r fig.width=17, fig.height=16}
+patchwork <- p_1 / 
+  ((wrap_elements(p_2) + wrap_elements(p_3)) + plot_layout(widths = c(1.6, 1))) +
+  plot_layout(heights = c(1, 2)) + 
+  plot_annotation(tag_levels = 'A') & 
+  theme(
+    plot.tag = element_text(size = 9, face = "bold"),
+    plot.title = element_text(
+      family = "Arial",
+      face = "bold",
+      size = 7,
+      hjust = 0.5
+    ),
+    plot.subtitle = element_text(
+      family = "Arial",
+      size = 7,
+      hjust = 0.5
+    )
+  )
+
+print(patchwork)
+
+ggsave(filename = "figure_03.png", plot = patchwork, dpi = "retina", width = 16.45, height = 13, units = "cm", scale = 1.2)
+```

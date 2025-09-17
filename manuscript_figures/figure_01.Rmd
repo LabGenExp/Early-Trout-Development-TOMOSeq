@@ -1,0 +1,213 @@
+---
+title: "Manuscript figure: Figure 1"
+author: "Kateřina Šimková & Ravindra Naraine"
+date: "June, 06 2025"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Library
+```{r library}
+library("ggplot2")
+library("ggrepel")
+library("tidyverse")
+library("qs2")
+library("patchwork")
+library("cowplot")
+library("grid")
+```
+
+# Load workspace
+```{r load particular objects}
+file_path <- "~/objects/"
+
+# Load final profile comparison data
+profile_comparison <- qs_read(paste0(file_path, "profile_comparison_3.qs2"),
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# Load Supp. fig. 02
+all_objects <- qs_read(paste0(file_path, "figure_01.qs2"), 
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# Export each element of the list into the global environment
+list2env(all_objects, envir = .GlobalEnv)
+
+# Remove the temporary list variable
+rm(all_objects)
+```
+
+
+# Pie chart 1 
+```{r}
+df1 <- profile_comparison
+df1$Group <- ifelse(df1$class == "protein_coding", "Protein coding", "Others")
+
+# Count number of genes per RNA class
+df1 <- df1 %>%
+  count(Group) %>%
+  mutate(percentage = n / sum(n) * 100,
+         label = ifelse(percentage > 0.5, paste0(round(percentage, 1), "%"), ""))  
+
+# Get the positions
+df1_1 <- df1 %>%
+  mutate(csum = rev(cumsum(rev(n))), 
+         pos = n / 2 + lead(csum, 1),
+         pos = if_else(is.na(pos), n / 2, pos),
+         outside = percentage < 10)  # threshold to push labels outside
+
+
+pie_chart_1 <- ggplot(df1_1, aes(x = "", y = n, fill = Group)) +
+  geom_col(width = 1, color = 1, size = 0.3) +
+  coord_polar(theta = "y", start = pi / 2) +
+  
+  # Inside labels
+  geom_text(data = df1_1 %>% filter(!outside),
+            aes(y = pos, label = label),
+            size = 3, family = "Arial", fontface = "plain", color = "black") +
+  
+  # Outside labels
+  geom_label_repel(data = df1_1 %>% filter(outside),
+                   aes(y = pos, label = label),
+                   size = 3, family = "Arial", fontface = "plain", 
+                   nudge_x = 1, nudge_y = -500,
+                   show.legend = FALSE, segment.color = "black",
+                   segment.size = 0.2) +
+  
+  guides(fill = guide_legend(title = "Group")) +
+  theme_void() +
+  scale_fill_manual(values = c("Protein coding" = "#ccebc5", "Others" = "#fed9a6"),
+                    labels = c(
+                      "Protein coding" = "Protein-coding RNA",
+                      "Others" = "Non-coding RNA")) +
+  theme(
+    legend.text = element_text(family = "Arial", face = "plain", size = 7),
+    legend.title = element_text(family = "Arial", face = "plain", size = 7),
+    plot.title = element_text(family = "Arial", face = "bold", size = 7, hjust = 0.5),
+    legend.key.size = unit(0.3, "cm"),
+    plot.margin = margin(0, 0, 0, 0, unit = "cm"),
+    legend.position = "right"
+  )
+
+print(pie_chart_1)
+```
+
+# Pie chart 2 
+```{r}
+# Count number of genes per RNA class
+df2 <- subset(profile_comparison, class != "protein_coding")
+df2 <- profile_comparison %>%
+  filter(class != "protein_coding") %>%
+  count(class) %>%
+  mutate(percentage = n / sum(n) * 100,
+         label = ifelse(percentage > 0.5, paste0(round(percentage, 1), "%"), ""))  
+
+# Get the positions
+df2_2 <- df2 %>%
+  mutate(csum = rev(cumsum(rev(n))), 
+         pos = n / 2 + lead(csum, 1),
+         pos = if_else(is.na(pos), n / 2, pos),
+         outside = percentage < 10)  # threshold to push labels outside
+
+pie_chart_2 <- ggplot(df2_2, aes(x = "", y = n, fill = class)) +
+  geom_col(width = 1, color = 1, size = 0.3) +
+  coord_polar(theta = "y") +
+  
+  # Inside labels
+  geom_text(data = df2_2 %>% filter(!outside),
+            aes(y = pos, label = label),
+            size = 3, family = "Arial", fontface = "plain", color = "black") +
+  
+  # Outside labels
+  geom_label_repel(data = df2_2 %>% filter(outside),
+                   aes(y = pos, label = label),
+                   size = 3, family = "Arial", fontface = "plain", 
+                   nudge_x = 1, show.legend = FALSE, segment.color = "black",
+                   segment.size = 0.2) +
+  
+  guides(fill = guide_legend(title = "Class")) +
+  theme_void() +
+  scale_fill_manual(values = c(
+    "lncRNA" = "#fbb4ae",
+    "guide_RNA" = "#e5d8bd",
+    "misc_RNA" = "#b3cde3",
+    "snoRNA" = "#decbe4",
+    "transcribed_pseudogene" = "#ffffcc"),
+    ,
+    labels = c(
+      "lncRNA" = "lncRNA",
+      "guide_RNA" = "gRNA",
+      "misc_RNA" = "miscRNA",
+      "snoRNA" = "snoRNA",
+      "transcribed_pseudogene" = "transcribed pseudogene"
+    )) +
+  theme(
+    legend.text = element_text(family = "Arial", face = "plain", size = 7),
+    legend.title = element_text(family = "Arial", face = "plain", size = 7),
+    plot.title = element_text(family = "Arial", face = "bold", size = 7, hjust = 0.5),
+    plot.margin = margin(0, 0, 0, -2, unit = "cm"),
+    legend.key.size = unit(0.3, "cm"),
+    legend.position = "right"
+  )
+
+print(pie_chart_2)
+```
+
+
+# Patchwork
+```{r, fig.width=6.6, fig.height=2.8}
+pie_chart_1_noleg <- pie_chart_1 + theme(legend.position = "none")
+pie_chart_2_noleg <- pie_chart_2 + theme(legend.position = "none")
+
+legend1 <- get_legend(pie_chart_1)
+legend2 <- get_legend(pie_chart_2)
+combined_legend <- plot_grid(legend1, legend2, ncol = 1, align = "v") +
+  theme(plot.margin = margin(0, 0, 1, 0, unit = "cm"))
+combined_legend
+
+pie_chart <-  wrap_elements(pie_chart_1_noleg) +
+  wrap_elements (pie_chart_2_noleg) +
+  wrap_elements(combined_legend) +
+  plot_layout(widths = c(2, 0.5, 1)) +
+  plot_annotation(
+    subtitle = "Protein-coding vs non-coding RNAs                Subclasses of non-coding RNAs",
+    theme = theme(
+      plot.subtitle = element_text(size = 7, family = "Arial", face = "bold", hjust = 0.3, vjust = -8))
+  )
+
+pie_chart
+
+# Draw combined plot and add lines
+patchwork <- function() {
+  # Draw combined plot first
+  print(pie_chart)
+  
+  # Add connector lines
+  grid.lines(x = unit(c(0.377, 0.55), "npc"), y = unit(c(0.49, 0.62), "npc"),
+             gp = gpar(col = "black", lwd = 0.7))
+  
+  grid.lines(x = unit(c(0.377, 0.55), "npc"), y = unit(c(0.47, 0.322), "npc"),
+             gp = gpar(col = "black", lwd = 0.7))
+}
+
+patchwork()
+
+# Convert cm to inches (1 inch = 2.54 cm)
+width_in <- 14 / 2.54
+height_in <- 6 / 2.54
+scale <- 1.2
+dpi <- 320  # 'retina' ~ 320 dpi
+
+# Save as PNG using grid-based drawing
+png(filename = "figure_01.png",
+    width = width_in * scale,
+    height = height_in * scale,
+    units = "in",
+    res = dpi)
+
+patchwork()
+
+dev.off()
+```

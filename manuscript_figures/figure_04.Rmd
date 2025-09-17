@@ -1,0 +1,395 @@
+---
+title: "Manuscript figure: Figure 4"
+author: "Kateřina Šimková & Ravindra Naraine"
+date: "June, 17 2025"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+Library
+```{r library}
+library("patchwork")
+library("ggplot2")
+library("grid")
+library("extrafont")
+library("DESeq2")
+library("ComplexUpset")
+library("ComplexHeatmap")
+library("qs2")
+library("dplyr")
+```
+
+# Load workspace
+```{r load particular objects}
+file_path <- "~/objects/"
+
+# Load trout profile comparison data
+# from 05_Orthology.Rmd
+profile_comparison <- qs_read(file_path(file_path, "profile_comparison_3.qs2"),
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# Load variance stabilized object for trout TOMO-seq
+# from 02_Differential_Analysis.Rmd
+rld <- qs_read(file_path(file_path, "rld.qs2"), 
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# Load progeny pathways
+# from 07_Gene_Ontology _(GO)_and_Pathway_enrichment.Rmd
+qs_readm(file.path(file_path, "progeny.qs2"))
+```
+
+# PCA plot of stage and sections
+```{r}
+name1 = "full_profile_changes"
+temp2_1 <- rld$blind[[name1]]
+temp1 <- plotPCA(temp2_1, intgroup = c("Position", "Stage"), ntop = 500)
+
+# PCA plotted
+p_1<- ggplot() +
+  geom_point(data = temp1$data, mapping = aes(x = PC1, y = Stage, 
+                                              colour = Position), size = 2) +
+  scale_color_manual(values = c("A" = "#9D88C1", "B" = "#CCC8E1", "C" = "#e2ccc0", "D" = "#FED098", "E" = "#F2AB79")) +  
+  xlab(label = as.character(temp1$labels$x)) + 
+  ylab(label = c("Stage")) + 
+  coord_fixed(ratio = 20) +
+
+  scale_y_discrete(labels = c("0_hpf" = "0 hpf", "1_hpf" = "1 hpf", "1_dpf" = "1 dpf", "3_dpf" = "3 dpf")) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        plot.title = element_text(size = 7, family = "Arial", face = "bold", hjust = 0.5),
+        text=element_text(family = "Arial"),
+        axis.title = element_text(colour="black", size = 7, face="plain"),
+        axis.text.x = element_text(colour="black", size = 7, face="plain"),
+        axis.text.y = element_text(colour="black", size = 7, face="plain"),
+        axis.line = element_line(linewidth=0.5, colour = "black"),
+        legend.position = "right", 
+        legend.key.size = unit(0.4, "cm"),
+        legend.text = element_text(colour="black", size = 5.5, face="plain"), 
+        legend.title = element_text(colour="black", size = 6.5, face="plain")) + 
+  labs(colour="Section")
+print(p_1)
+```
+
+# UpSet plot
+```{r}
+# Calculate the counts for each set and intersection
+0_hpf <- profile_comparison$gene_id[profile_comparison$deseq_0_hpf_change %in% TRUE & 
+                                       !is.na(profile_comparison$course_profile_0_hpf)]
+x1_hpf<- profile_comparison$gene_id[profile_comparison$deseq_1_hpf_change %in% TRUE & 
+                                       !is.na(profile_comparison$course_profile_1_hpf)]
+x1_dpf<- profile_comparison$gene_id[profile_comparison$deseq_1_dpf_change%in% TRUE & 
+                                         !is.na(profile_comparison$course_profile_1_dpf)]
+x3_dpf<- profile_comparison$gene_id[profile_comparison$deseq_3_dpa_change %in% TRUE &
+                                           !is.na(profile_comparison$course_profile_3_dpf)]
+
+# Combine all unique genes into a single vector
+all_genes <- unique(c(0_hpf, x1_hpf, x1_dpf, x3_dpf))
+
+# Create a binary data frame indicating gene membership in each set
+upset_data <- data.frame(
+  Gene = all_genes,
+  `0 hpf` = all_genes %in% 0_hpf,
+  `1 hpf` = all_genes %in% x1_hpf,
+  `1 dpf` = all_genes %in% x1_dpf,
+  `3 dpf` = all_genes %in% x3_dpf
+)
+
+colnames(upset_data) <- c("Gene", "0_hpf", "1_hpf", "1_dpf", "3_dpf")
+
+# Generate the UpSet plot
+p_2 <- ComplexUpset::upset(
+  upset_data,
+  intersect = c("0_hpf", "1_hpf", "1_dpf", "3_dpf"),
+   base_annotations = list(
+    'Intersection size' = intersection_size(counts = TRUE, text = list(size = 2, family = "Arial", colour = "black"))
+  ),
+  matrix = intersection_matrix(geom = geom_point(size = 2.1)),  
+  themes=upset_modify_themes(
+    list(
+      'intersections_matrix'=theme(text=element_text(size=7, colour = "black", family = "Arial"), axis.title = element_blank()),
+      'overall_sizes'=theme(text=element_text(size=6, colour = "black", family = "Arial")),
+      'Intersection size'=theme(text=element_text(size=6, colour = "black", family = "Arial"), axis.text.y = element_text(size = 6, family = "Arial", colour = "black"))
+    )
+  ),
+  queries = list(
+    upset_query(set = "0 hpf", fill = "#F8766D"),
+    upset_query(set = "1 hpf", fill = "#7CAE00"),
+    upset_query(set = "1 dpf", fill = "#00BFC4"),
+    upset_query(set = "3 dpf", fill = "#C77CFF"),
+    upset_query(intersect = '0 hpf',
+      color = '#F8766D',
+      fill = '#F8766D',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(intersect = '1 hpf',
+      color = '#7CAE00',
+      fill = '#7CAE00',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(intersect = '1 dpf',
+      color = '#00BFC4',
+      fill = '#00BFC4',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(intersect = '3 dpf',
+      color = '#C77CFF',
+      fill = '#C77CFF',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      intersect = c('0 hpf', '1 hpf'),
+      color = '#d3e2dd',
+      fill = '#d3e2dd',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+    upset_query(
+      intersect = c('0 hpf', '1 dpf'),
+      color = '#d3e2dd',
+      fill = '#d3e2dd',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+     upset_query(
+      intersect = c('0 hpf', '3 dpf'),
+      color = '#d3e2dd',
+      fill = '#d3e2dd',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+     upset_query(
+      intersect = c('0 hpf', '1 hpf', '1 dpf', '3 dpf'),
+      color = '#d3e2dd',
+      fill = '#d3e2dd',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+     upset_query(
+      intersect = c('0 hpf', '1 hpf', '1 dpf'),
+      color = '#d3e2dd',
+      fill = '#d3e2dd',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+     upset_query(
+      intersect = c('0 hpf', '1 hpf', '3 dpf'),
+      color = '#d3e2dd',
+      fill = '#d3e2dd',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+      upset_query(
+      intersect = c('0 hpf', '1 dpf', '3 dpf'),
+      color = '#d3e2dd',
+      fill = '#d3e2dd',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+      upset_query(
+      intersect = c('1 hpf', '1 dpf', '3 dpf'),
+      color = '#d3e2dd',
+      fill = '#d3e2dd',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+      upset_query(
+      intersect = c('1 hpf', '3 dpf'),
+      color = '#d3e2dd',
+      fill = '#d3e2dd',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+      upset_query(
+      intersect = c('1 dpf', '3 dpf'),
+      color = '#d3e2dd',
+      fill = '#d3e2dd',
+      only_components = c('intersections_matrix', 'Intersection size')
+    ),
+      upset_query(
+      intersect = c('1 hpf', '1 dpf'),
+      color = '#d3e2dd',
+      fill = '#d3e2dd',
+      only_components = c('intersections_matrix', 'Intersection size')
+    )
+  ),
+  width_ratio = 0.1,
+  set_sizes = (
+    upset_set_size() +
+      scale_y_continuous(breaks = NULL) 
+  )
+)
+
+# Now add your annotation and global theme
+p_2 <- p_2 +
+  plot_annotation(
+    title = "Comparison of shared DLTs in early development"
+  ) &
+  theme(
+    plot.title = element_text(
+      size = 7,
+      family = "Arial",
+      face = "bold",
+      hjust = 0.5,
+      colour = "black"
+    ),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.background = element_blank()
+  )
+
+print(p_2)
+```
+
+# Pathways
+```{r}
+# Define annotation colors
+ann_colors <- list(
+  stage =  c('0 hpf'="#F8766D", '1 hpf'="#7CAE00", '1 dpf'="#00BFC4", '3 dpf'="#C77CFF"),
+  position =  c("A" = "#9D88C1", "B" = "#CCC8E1", "C" = "#E2CCC0", "D" = "#FED098", "E" = "#F2AB79")
+)
+
+my_sample_col$stage <- gsub(pattern = "_", replacement = " ", x = my_sample_col$stage)
+my_sample_col$stage <- factor(my_sample_col$stage, levels = c('0 hpf', '1 hpf', '1 dpf', '3 dpf'))
+
+# Create row annotation
+row_ha <- rowAnnotation(
+  df = my_sample_col,
+  col = ann_colors,
+  simple_anno_size = unit(1, "mm"),
+  annotation_name_gp = gpar(fontsize = 0),
+  annotation_name = NULL,
+  annotation_legend_param = list(
+    stage = list(
+      title = "Stage",
+      title_gp = gpar(fontsize = 6.5, fontfamily = "Arial"),
+      labels_gp = gpar(fontsize = 5.5, fontfamily = "Arial"),
+      grid_height = unit(1.5, "mm"),
+      grid_width = unit(2.5, "mm")
+    ),
+    position = list(
+      title = "Position",
+      title_gp = gpar(fontsize = 6.5, fontfamily = "Arial"),
+      labels_gp = gpar(fontsize = 5.5, fontfamily = "Arial"),
+      grid_height = unit(1.5, "mm"),
+      grid_width = unit(2.5, "mm")
+    )
+  )
+)
+
+# Generate the heatmap
+ht_3 <- ComplexHeatmap::pheatmap(
+  mat = t(as.matrix(temp102)), 
+  scale = "none", 
+  cluster_rows = FALSE, 
+  cluster_cols = TRUE, 
+  show_rownames = FALSE, 
+  show_colnames = TRUE , 
+  color = heatmap_colors,
+  treeheight_row = 0, 
+  treeheight_col = 0, 
+  left_annotation = row_ha,
+  show_row_dend = FALSE,
+  show_column_dend = FALSE,
+  row_split = as.factor(my_sample_col$stage),
+  fontsize = 6,
+  fontsize_col = 6,
+  fontface = "plain",
+  fontfamily = "Arial",
+  column_title = NULL,  
+  row_title = NULL,
+  name = NULL,
+  legend = TRUE,         
+  annotation_legend = FALSE,
+  breaks = breaks_list, 
+  use_raster = FALSE, 
+  border = NA,
+  column_names_side = "top",
+  heatmap_legend_param = list(
+    title_gp = grid::gpar(fontsize = 6.5, fontface = "plain", fontfamily = "Arial"),  
+    labels_gp = grid::gpar(fontsize = 5.5, fontfamily = "Arial"),
+    legend_height = unit(0.1, "cm"),
+    grid_width = unit(0.2, "cm"),
+    at = c(-2, 0, 2),
+    title = "Score"
+  )
+)
+
+
+# Create and draw the heatmap, merging legends
+p3_grob <- grid::grid.grabExpr({
+  ComplexHeatmap::draw(ht_3, 
+                       merge_legend = TRUE, 
+                       padding = unit(c(0, 0.6, 1.8, 1), "cm"))
+})
+
+# Wrap it for patchwork
+p_3 <- patchwork::wrap_elements(full = p3_grob)
+p_3
+```
+
+# GO terms - table (GO compass)
+```{r}
+img <- png::readPNG(file_path(file_path, "stage_section_edited.png"))
+
+img_grob <- rasterGrob(img, interpolate = TRUE)
+
+p_4 <- ggplot() +
+  annotation_custom(img_grob, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  xlim(0, 10) + ylim(0, 10) +
+  theme_void()
+
+print(p_4)
+```
+
+# Patchwork
+```{r fig.width=15, fig.height=10}
+layout_1<-  "ABB"
+
+p_2_wrapped <- wrap_elements(full = p_2)
+
+patchwork_1 <- 
+  p_1 + labs(title = "Variance along A-V axis", tag = "A") +
+  p_2_wrapped + labs(tag = "B") +
+  plot_layout(design = layout_1, heights = c(1, 1)) +
+  plot_annotation(tag_levels = NULL) &  # Ensure equal widths
+  theme(
+    plot.tag = element_text(size = 9, face = "bold"),
+    plot.title = element_text(
+      family = "Arial", # Change to your desired font
+      face = "bold",    # Bold text
+      size = 7,        # Font size for title
+      hjust = 0.5       # Center-align the title
+    )
+  ) 
+
+print(patchwork_1)
+
+layout_2<-  "ABB"
+
+patchwork_2<- p_3 + labs(title = "Signaling pathway activity", tag = "C") + 
+  wrap_elements(p_4) + labs(title = "GO terms enrichment in stages and sections", tag = "D") +
+  plot_layout(design = layout_2) +
+  plot_annotation(tag_levels = NULL) & 
+  theme(
+    plot.tag = element_text(size = 9, face = "bold"),
+    plot.title = element_text(
+      family = "Arial", # Change to your desired font
+      face = "bold",    # Bold text
+      size = 7,        # Font size for title
+      hjust = 0.5       # Center-align the title
+    )
+  )
+print(patchwork_2)
+
+layout_3<-  "
+A
+A
+A
+B
+B
+B
+B
+"
+
+patchwork<- wrap_elements(full = patchwork_1) + wrap_elements(full = patchwork_2) + plot_layout(design = layout_3)
+
+print(patchwork)
+
+ggsave(filename = "figure_03.png", plot = patchwork, dpi = "retina", width = 16.45, height = 13, units = "cm", scale = 1.2)
+```
