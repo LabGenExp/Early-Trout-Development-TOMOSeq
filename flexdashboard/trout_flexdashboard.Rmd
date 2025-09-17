@@ -1,0 +1,324 @@
+---
+title: "Trout Gene Expression Explorer"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    # theme: 
+    #   version: 5
+    #   bootswatch: flatly #flatly  # or 'cerulean', 'darkly', 'cosmo', 'slate', etc.
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+tags$head(
+  tags$style(HTML("
+    body {
+      color: #333;
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    }
+  "))
+)
+
+# List of required packages
+packages <- c("flexdashboard", "shiny", "tidyverse", "qs2", "ragg")
+
+# Install any that aren't already installed
+installed <- packages %in% rownames(installed.packages())
+if (any(!installed)) {
+  install.packages(packages[!installed])
+}
+
+# Load all packages
+lapply(packages, library, character.only = TRUE)
+
+# folder path to trout_flexdashboard.qs2 file
+folder_path <- "./objects/"
+
+# Load data
+qs_readm(file.path(folder_path, "trout_flexdashboard.qs2"))
+
+gene_choices <- unique(na.omit(c(
+  ortholog_final_trout$trout_gene_symbol, 
+  ortholog_final_trout$trout_zebrafish_symbol, 
+  ortholog_final_trout$trout_brook_symbol)))
+
+theme_custom <- theme_classic(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "plain", hjust = 0.5, size = 10),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold"),
+    axis.title = element_text(size = 10), 
+    plot.margin = margin(5, 5, 5, 5))
+
+# Define the universal Stage levels and color palette
+stage_levels <- c("0_hpf", "1_hpf", "2_hpf", "3_hpf", "1_dpf", "3_dpf")
+stage_colors <- c("0_hpf" = "#F8766D", "1_hpf" = "#7CAE00", "1_dpf" = "#00BFC4","2_hpf" = "#00BFC4", "3_dpf" = "#C77CFF", "3_hpf" = "#C77CFF")
+```
+
+```{r}
+plot_expression <- function(df, title, subtitle, facet_formula) {
+  ggplot(df, aes(x = Position, y = count, color = Stage, group = Stage)) +
+    geom_point(size = 2) +
+    geom_smooth(se = FALSE, method = "loess", linewidth = 0.8) +
+    scale_color_manual(values = stage_colors) +
+    labs(title = title, subtitle = subtitle) +
+    theme_custom + 
+    facet_formula
+}
+```
+
+Row {data-height=40}
+-----------------------------------------------------------------------
+### **General information** {.tabset}
+```{r}
+renderUI({
+  HTML("
+    <div style='background-color:#f8f9fa; border-left: 6px solid #5bc0de; padding: 15px; border-radius: 6px; font-size: 14px;'>
+      <h4 style='margin-top: 0; color:#337ab7;'>Welcome to the Trout Gene Expression Explorer</h4>
+      <p>This interactive dashboard allows you to explore gene expression patterns across early developmental stages of <b>rainbow trout</b> (<i>Oncorhynchus mykiss</i>), <b>hybrid trout</b> (<i>O. mykiss</i> egg fertilized with <i>Salvelinus fontinalis</i> sperm), and <b>zebrafish</b> (<i>Danio rerio</i>).</p>
+      <ul>
+        <li><b>Gene Selector:</b> Choose or type a gene ID to view its spatial expression profile.</li>
+        <li><b>Plots:</b> Visualize gene expression across 5 sections and developmental stages. The ortologs for the given gene is ploted across the species.</li>
+        <li><b>Metadata:</b> Explore comparative summaries of expression features for each species. If a gene is listed with a profile it is differentially localized with a fold change of 2x.</li>
+      </ul>
+      <p>Developmental stages assessed in zebrafish: 0 hpf (freshly fertilized egg/zygote), 1 hpf (early cleavage stage), 1 dpf (early blastula stage, ~32-64 cells), and 3 dpf (mid-blastula, ~1000 cells).</p
+      <p>Developmental stages assessed in trout/hybrid: 0 hpf (freshly fertilized egg/zygote), 1 hpf (early cleavage stage), 1 dpf (early blastula stage, ~32-64 cells), and 3 dpf (mid-blastula, ~1000 cells).</p
+      <p>Positions: A-extreme animal, B-animal, C-central, D-vegetal, E-extreme vegetal.</p>
+<p>Trout hybrid: Genome1 = <i>O. mykiss</i>;   Genome2 = <i>Salvelinus fontinalis</i>.</p>
+      <p>This tool complements the publication <i>“Trout Development”</i> (Journal, YYYY), enabling interactive visualization of gene abundance dynamics during embryogenesis.</p>
+    </div>
+  ")
+})
+```
+
+### **Gene Selector**
+```{r}
+div(
+  style = "background-color: #e9f7fc; padding: 8px; border-radius: 6px; 
+           border: 1px solid #d4d4d4; margin-bottom: 10px; width: fit-content;",
+  selectizeInput(
+    "gene_query", 
+    "Select or Type Gene ID:", 
+    choices = gene_choices, 
+    selected = "nanog",
+    options = list(create = TRUE, maxOptions = 1000),
+    width = '250px' 
+  )
+)
+```
+
+```{r}
+### Metadata {.tabset .scrollable}
+div(
+  style = "max-height:30vh; max-width:35vw; 
+           overflow-x:auto; overflow-y:auto; 
+           padding:10px; margin-top: 5px;
+           border: 1px solid #d4d4d4;
+           background-color: #fcfcfc; border-radius: 6px;",
+
+  # Title goes inside the scrollable box
+  div(style = "color:#555; font-weight:bold; margin-bottom: 10px;", "ℹ️ Metadata Overview"),
+
+  # Tabset panel inside the scrollable div
+  tabsetPanel(
+    tabPanel("Rainbow trout", tableOutput("troutInfo")),
+    tabPanel("Hybrid trout", tableOutput("hybridInfo")),
+    tabPanel("Zebrafish", tableOutput("zebrafishInfo"))
+  )
+)
+```
+
+Column {data-width=420}
+-----------------------------------------------------------------------
+### **Trout TOMO-seq** {.tabset}
+```{r}
+div(style = "width:100%; max-height:80vh; overflow-y:auto;
+            padding: 10px; background-color: #fdfdfd; 
+            border: 1px solid #d4d4d4; border-radius: 6px;",
+    plotOutput("troutPlot", width = "100%", height = "auto")
+)
+```
+
+Column {data-width=420}
+-----------------------------------------------------------------------
+### **Hybrid TOMO-seq** {.tabset}
+```{r}
+div(style = "width:100%; max-height:80vh; overflow-y:auto;
+            padding: 10px; background-color: #f9fbfd; 
+            border: 1px solid #d4d4d4; border-radius: 6px;",
+    plotOutput("hybridPlot", width = "100%", height = "auto")
+)
+```
+
+Column {data-width=420}
+-----------------------------------------------------------------------
+### **Zebrafish TOMO-seq** {.tabset}
+```{r}
+div(style = "width:100%; max-height:80vh; overflow-y:auto;
+            padding: 10px; background-color: #fdfdfd ; 
+            border: 1px solid #d4d4d4; border-radius: 6px;",
+    plotOutput("zebrafishPlot", width = "100%", height = "auto")
+)
+```
+
+```{r}
+# Reactive filtering
+ortholog_comparison <- reactive({
+  req(input$gene_query)
+  ortholog_final_trout %>% filter(if_any(everything(), ~ . == input$gene_query))
+})
+
+# Reactive Rainbow trout data
+df_long_trout <- reactive({
+  trout_genes <- unique(na.omit(ortholog_comparison()$trout_gene_symbol))
+  validate(need(length(trout_genes) > 0, "No matching trout gene found."))
+  expression_trout_df %>%
+    filter(gene_id %in% trout_genes) %>%
+    pivot_longer(cols = -gene_id, names_to = "sample", values_to = "count") %>%
+    mutate(
+      Stage = str_extract(sample, "\\d+_(?:hpf|dpf)"),
+      Position = str_extract(sample, "(?<=_)[A-E](?=_)"),
+      Position = factor(Position, levels = c("A", "B", "C", "D", "E")),
+      Stage = factor(Stage, levels = stage_levels)
+    )
+})
+
+# Rainbow trout plot
+output$troutPlot <- renderPlot({
+  df <- df_long_trout()
+  req(nrow(df) > 0)
+  plot_expression(
+    df = df,
+    title = "",
+    subtitle = paste("Gene:", input$gene_query),
+    facet_formula = facet_grid(gene_id ~ .)
+  )
+}, height = function() {
+  df <- df_long_trout()
+  n_facets <- length(unique(df$gene_id))
+  max(300, n_facets * 300)
+})
+
+# Rainbow trout datainfo
+output$troutInfo <- renderTable({
+  df <- df_long_trout()
+  df_info <- profile_comparison_trout_small %>% filter(gene_id %in% unique(df$gene_id))
+  if (nrow(df_info) == 0) return(data.frame(Note = "No metadata found for selected gene."))
+  
+  df_info %>%
+    t() %>%
+    as.data.frame() %>%
+    filter(!if_all(everything(), is.na)) %>%
+    rownames_to_column("Variable") %>%
+    setNames(c("Variable", paste0("Gene ", 1:(ncol(.)-1))))
+}, striped = TRUE, hover = TRUE, bordered = TRUE, spacing = "xs")
+
+
+
+# Reactive Hybrid trout data
+df_long_hybrid <- reactive({
+  genes <- unique(c(
+    paste0("genome1_", na.omit(ortholog_comparison()$trout_gene_symbol)),
+    paste0("genome2_", na.omit(ortholog_comparison()$trout_brook_symbol))
+  ))
+  validate(need(length(genes) > 0, "No matching hybrid gene found."))
+  expression_hybrid_df %>%
+    filter(gene_id %in% genes) %>%
+    pivot_longer(cols = -gene_id, names_to = "sample", values_to = "count") %>%
+    mutate(
+      Stage = str_extract(sample, "\\d+_(?:hpf|dpf)"),
+      Position = str_extract(sample, "(?<=_)[A-E](?=_)"),
+      Genome = gsub("_.*", "", gene_id),
+      gene_id = gsub(".*_", "", gene_id),
+      Position = factor(Position, levels = c("A", "B", "C", "D", "E")),
+      Stage = factor(Stage, levels = stage_levels)
+    )
+})
+
+# Hybrid trout plot
+output$hybridPlotWrapper <- renderUI({
+  df <- df_long_hybrid()
+  height_px <- if (length(unique(df$Genome)) > 1) "440px" else "300px"
+  
+  div(style = paste0("height:", height_px, ";"),
+      plotOutput("hybridPlot", width = "100%", height = "100%"))
+})
+
+output$hybridPlot <- renderPlot({
+  df <- df_long_hybrid()
+  req(nrow(df) > 0)
+  plot_expression(
+    df = df,
+    title = "",
+    subtitle = paste("Gene:", input$gene_query),
+    facet_formula = facet_grid(gene_id ~ Genome)
+  )
+}, height = function() {
+  df <- df_long_hybrid()
+  n_facets <- max(length(unique(paste0(df$gene_id, df$Genome))), length(unique(df$Genome)))
+  max(300, n_facets * 300)
+})
+
+# Hybrid trout datainfo
+output$hybridInfo <- renderTable({
+  df <- df_long_hybrid()
+  df_info <- profile_comparison_hybrid_small %>% filter(gene_id %in% unique(df$gene_id))
+  if (nrow(df_info) == 0) return(data.frame(Note = "No metadata found for selected gene."))
+  
+  df_info %>%
+    t() %>%
+    as.data.frame() %>%
+    filter(!if_all(everything(), is.na)) %>%
+    rownames_to_column("Variable") %>%
+    setNames(c("Variable", paste0("Gene ", 1:(ncol(.)-1))))
+}, striped = TRUE, hover = TRUE, bordered = TRUE, spacing = "xs")
+
+
+# Reactive zebrafish data
+df_long_zebrafish <- reactive({
+  genes <- unique(na.omit(ortholog_comparison()$trout_zebrafish_symbol))
+  validate(need(length(genes) > 0, "No matching zebrafish gene found."))
+  expression_zebrafish_df %>%
+    filter(gene_id %in% genes) %>%
+    pivot_longer(cols = -gene_id, names_to = "sample", values_to = "count") %>%
+    mutate(
+      Stage = str_extract(sample, "\\d+_(?:hpf|dpf)"),
+      Position = str_extract(sample, "(?<=_)[A-E](?=_)"),
+      gene_id = gsub(".*_", "", gene_id),
+      Position = factor(Position, levels = c("A", "B", "C", "D", "E")),
+      Stage = factor(Stage, levels = stage_levels)
+    )
+})
+
+# zebrafish plot
+output$zebrafishPlot <- renderPlot({
+  df <- df_long_zebrafish()
+  req(nrow(df) > 0)
+  plot_expression(
+    df = df,
+    title = "",
+    subtitle = paste("Gene:", input$gene_query),
+    facet_formula = facet_grid(gene_id ~ .)
+  )
+}, height = function() {
+  df <- df_long_zebrafish()
+  n_facets <- length(unique(df$gene_id))
+  max(300, n_facets * 300)
+})
+
+# zebrafish info
+output$zebrafishInfo <- renderTable({
+  df <- df_long_zebrafish()
+  df_info <- profile_comparison_zebrafish_small %>% filter(gene_id %in% unique(df$gene_id))
+  if (nrow(df_info) == 0) return(data.frame(Note = "No metadata found for selected gene."))
+  
+  df_info %>%
+    t() %>%
+    as.data.frame() %>%
+    filter(!if_all(everything(), is.na)) %>%
+    rownames_to_column("Variable") %>%
+    setNames(c("Variable", paste0("Gene ", 1:(ncol(.)-1))))
+}, striped = TRUE, hover = TRUE, bordered = TRUE, spacing = "xs")
+```
