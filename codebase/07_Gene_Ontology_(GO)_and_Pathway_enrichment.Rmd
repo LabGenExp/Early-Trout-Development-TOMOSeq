@@ -1,0 +1,550 @@
+---
+title: "Gene ontology enrichment analysis"
+author: "Ravindra Naraine"
+date: "March 03, 2025"
+subtitle: "Gene ontology enrichment analysis"
+abstract: |
+  This notebook continues the analysis described in **RNA redistribution driven by alterations in transcription during early embryogenesis of rainbow trout**. It focuses on gene ontology enrichment in *Oncorhynchus mykiss* (rainbow trout) embryos. It presents a systematic functional interpretation of differentially localized transcripts identified across four developmental stages (0-hpf, 1-hpf, 1-dpf, 3-dpf). The notebook integrates GO enrichment using gprofiler2 and regulatory activity inference using decoupleR. Enrichment is performed for multiple spatial and temporal expression profiles, including animal–vegetal pole separation, de novo expression, degradation, and complex pattern shifts. Outputs are formatted for visualization with GO Compass.
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+# **Gene ontology analysis**
+```{r setup, include=TRUE, cache=TRUE}
+# location of working folder
+here <- "./07_gene_ontology/"
+```
+
+# **Install and Load Required Libraries**
+```{r libraries, echo=FALSE, message=FALSE, warning=FALSE}
+# Set memory limit for Java and reproducibility seed
+options(java.parameters = "-Xmx30000m")
+set.seed(100)
+
+# List of required packages (from CRAN and Bioconductor)
+required_packages <- c("dplyr", "ggplot2", "future", 
+                       "gprofiler2", "qs2", "future.apply",
+                       "purrr", "decoupleR", "OmnipathR",
+                       "SeuratExtend", "DESeq2")
+
+# Apply the function to load required packages
+invisible(lapply(required_packages, function(x) {
+  suppressPackageStartupMessages(library(x, character.only = TRUE))
+}))
+```
+
+# **Objects**
+```{r define objects}
+# store gene ontology results
+GO_zebrafish <- list()
+```
+
+# **load object variables**
+```{r}
+# Define the file path where your saved list is stored
+file_path <- file.path(here, "../02_deseq_analysis", "output")
+
+# sample metadata
+samplesDESeq <- qs_read(file.path(file_path, "samplesDESeq.qs2"),
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# load in DESeq2 data
+ddsTC <- qs_read(file.path(file_path, "ddsTC.qs2"),
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# load in variance stabilized transformation of gene counts
+rld <- qs_read(file.path(file_path, "rld.qs2"),
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# Define the file path where your saved list is stored
+file_path <- file.path(here, "../05_orthology", "output")
+
+# load in DLT data for trout
+profile_comparison <- qs_read(file.path(file_path, "profile_comparison.qs2"),
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+```
+
+# **gprofiler2**
+## Stage-specific GO enrichment
+```{r stage - gprofiler}
+# Define stage names
+stages <- c("0_hpf", "1_hpf", "1_dpf", "3_dpf")
+
+# Use map to iterate over stages and extract unique genes per stage
+multiquery <- map(set_names(stages), function(stage) {
+  profile_comparison %>%
+    filter(!is.na(.data[[paste0("course_profile_", stage)]]) & !is.na(zebrafish_human)) %>%
+    distinct(zebrafish_human) %>%
+    pull(zebrafish_human)
+})
+
+# Get count of unique genes per stage
+map_int(multiquery, length)
+
+# merge data across conditions
+GO_zebrafish[["stages"]][["multiquery_true"]] <- gost(query = multiquery, 
+                              organism = "drerio", 
+                      ordered_query = FALSE, multi_query = TRUE, 
+                      significant = TRUE, exclude_iea = FALSE,
+                      measure_underrepresentation = FALSE,
+                      evcodes = TRUE, user_threshold = 0.05,
+                      correction_method = "gSCS",
+                      domain_scope = "annotated",
+                      numeric_ns = "ENTREZGENE_ACC")
+
+# keep each analysis separate and show the genes of interest
+GO_zebrafish[["stages"]][["multiquery_false"]] <- gost(query = multiquery, 
+                              organism = "drerio", 
+                              ordered_query = FALSE, multi_query = FALSE, 
+                              significant = TRUE, exclude_iea = FALSE,
+                              measure_underrepresentation = FALSE,
+                              evcodes = TRUE, user_threshold = 0.05,
+                              correction_method = "gSCS",
+                              domain_scope = "annotated",
+                              numeric_ns = "ENTREZGENE_ACC")
+```
+```{r stage - gocompass}
+# create files for go_compass
+temp1 <- GO_zebrafish[["stages"]][["multiquery_true"]]$result %>%
+  as.data.frame() %>%
+  # Keep only rows where the annotation source is Gene Ontology Biological Process
+  dplyr::filter(source == "GO:BP") %>%
+  # Select only the term ID and the p_values list-column
+  dplyr::select(GO_ID = term_id, p_values) %>%
+  # Ensure that each element in the p_values list-column is a numeric vector
+  dplyr::mutate(p_values = lapply(p_values, as.numeric)) %>%
+  # Spread each numeric vector in the p_values column into separate columns (one per condition)
+  tidyr::unnest_wider(p_values, names_sep = "_") %>%
+  # Rename the generated columns to match condition names used by GO compass
+  dplyr::rename(
+    `0_hpf` = p_values_1,
+    `1_hpf` = p_values_2,
+    `1_dpf` = p_values_3,
+    `3_dpf` = p_values_4
+  )
+
+# write data for gocompass
+write.table(x = temp1, file = file.path(here, "output", "stage_gprofiler.tsv"), row.names = F, col.names = T, sep = "\t")
+```
+
+## Pole-specific GO enrichment (animal vs vegetal)
+```{r stage - vegetal vs animal gprofiler}
+# Define the mapping from full column names to short stage names
+name_map <- c(
+  "course_profile_0_hpf"     = "0_hpf",
+  "course_profile_1_hpf"     = "1_hpf",
+  "course_profile_1_dpf"   = "1_dpf",
+  "course_profile_3_dpf" = "3_dpf"
+)
+
+# Extract the full profile column names
+profile_cols <- names(name_map)
+
+# Build a flat named list of unique zebrafish_human gene IDs
+# for 'animal' and 'vegetal' expression profiles at each stage
+go_list_items <- profile_cols %>%
+  lapply(function(profile_col) {
+    # Get short stage name from map
+    stage <- name_map[[profile_col]]
+
+    # Filter for rows with non-missing profile and zebrafish_human ID
+    filtered <- profile_comparison %>%
+      dplyr::filter(!is.na(.data[[profile_col]]), !is.na(zebrafish_human))
+
+    # Extract unique gene IDs for each expression domain
+    animal <- filtered$zebrafish_human[filtered[[profile_col]] == "animal"] %>% unique()
+    vegetal <- filtered$zebrafish_human[filtered[[profile_col]] == "vegetal"] %>% unique()
+
+    # Return a named list: e.g. "0_hpa_a" = animal, "0_hpa_v" = vegetal
+    tibble::lst(
+      !!paste0(stage, "_a") := animal,
+      !!paste0(stage, "_v") := vegetal
+    )
+  }) %>%
+  purrr::list_flatten()  # Merge all stage-specific sublists into a single named list
+
+# Compute summary of each list element
+go_list_summary <- tibble::tibble(
+  group = names(go_list_items),
+  stage = sub("_(a|v)$", "", names(go_list_items)),       # Extract stage name
+  pole  = ifelse(grepl("_a$", names(go_list_items)),      # Determine domain
+                 "animal", "vegetal"),
+  gene_count = lengths(go_list_items)                     # Count of genes
+)
+
+# View the summary table
+go_list_summary
+
+# merge data across conditions
+GO_zebrafish[["stages_section_a_v"]][["multiquery_true"]] <- gost(query = go_list_items, 
+                                                                  organism = "drerio", 
+                                                                  ordered_query = FALSE, multi_query = TRUE, 
+                                                                  significant = TRUE, exclude_iea = F,
+                                                                  measure_underrepresentation = FALSE,
+                                                                  evcodes = TRUE, user_threshold = 0.05,
+                                                                  correction_method = "gSCS",
+                                                                  domain_scope = "annotated",
+                                                                  numeric_ns = "ENTREZGENE_ACC")
+
+# keep each analysis separate and show the genes of interest
+GO_zebrafish[["stages_section_a_v"]][["multiquery_false"]] <- gost(query = go_list_items, 
+                                                                   organism = "drerio", 
+                                                                   ordered_query = FALSE, multi_query = F, 
+                                                                   significant = TRUE, exclude_iea = F,
+                                                                   measure_underrepresentation = FALSE,
+                                                                   evcodes = TRUE, user_threshold = 0.05,
+                                                                   correction_method = "gSCS",
+                                                                   domain_scope = "annotated",
+                                                                   numeric_ns = "ENTREZGENE_ACC")
+```
+```{r stage - vegetal vs animal - gocompass}
+# create files for go_compass
+temp1 <- GO_zebrafish[["stages_section_a_v"]][["multiquery_true"]]$result %>%
+  as.data.frame() %>%
+  # Keep only rows where the annotation source is Gene Ontology Biological Process
+  dplyr::filter(source == "GO:BP") %>%
+  # Select only the GO_ID and the p_values list-column
+  dplyr::select(GO_ID = term_id, p_values) %>%
+  # Ensure that each element in the p_values list-column is a numeric vector
+  dplyr::mutate(p_values = lapply(p_values, as.numeric)) %>%
+  # Spread each numeric vector in the p_values column into separate columns (one per condition)
+  tidyr::unnest_wider(p_values, names_sep = "_") %>%
+  # Rename the generated columns to match condition names used by GO compass
+  dplyr::rename(
+    `0_hpf_a` = p_values_1,
+    `0_hpf_v` = p_values_2,
+    `1_hpf_a` = p_values_3,
+    `1_hpf_v` = p_values_4,
+    `1_dpf_a` = p_values_5,
+    `1_dpf_v` = p_values_6,
+    `3_dpf_a` = p_values_7,
+    `3_dpf_v` = p_values_8
+  )
+
+# write data for gocompass
+write.table(x = temp1, file = file.path(here, "output", "stage_a_v_gprofiler.tsv"), row.names = F, col.names = T, sep = "\t")
+```
+
+## Temporal patterns (denovo vs degradation)
+```{r stage - denovo degradation gprofiler}
+# Define the profile types you're interested in
+stage_types <- c("denovo", "degradation")
+
+# Create a named list of unique genes per type
+multiquery <- map(set_names(stage_types), function(type) {
+  profile_comparison %>%
+    filter(course_profile_stages == type, !is.na(zebrafish_human)) %>%
+    distinct(zebrafish_human) %>%
+    pull(zebrafish_human)
+})
+
+# Get count of unique genes per group
+map_int(multiquery, length)
+
+# merge data across conditions
+GO_zebrafish[["stages_total_alterations"]][["multiquery_true"]] <- gost(query = multiquery, 
+                              organism = "drerio", 
+                      ordered_query = FALSE, multi_query = TRUE, 
+                      significant = TRUE, exclude_iea = FALSE,
+                      measure_underrepresentation = FALSE,
+                      evcodes = TRUE, user_threshold = 0.05,
+                      correction_method = "gSCS",
+                      domain_scope = "annotated",
+                      numeric_ns = "ENTREZGENE_ACC")
+
+# keep each analysis separate and show the genes of interest
+GO_zebrafish[["stages_total_alterations"]][["multiquery_false"]] <- gost(query = multiquery, 
+                              organism = "drerio", 
+                              ordered_query = FALSE, multi_query = FALSE, 
+                              significant = TRUE, exclude_iea = FALSE,
+                              measure_underrepresentation = FALSE,
+                              evcodes = TRUE, user_threshold = 0.05,
+                              correction_method = "gSCS",
+                              domain_scope = "annotated",
+                              numeric_ns = "ENTREZGENE_ACC")
+```
+```{r stage - denovo degradation - gocompass}
+# create files for go_compass
+temp1 <- GO_zebrafish[["stages_total_alterations"]][["multiquery_true"]]$result %>%
+  as.data.frame() %>%
+  # Keep only rows where the annotation source is Gene Ontology Biological Process
+  dplyr::filter(source == "GO:BP") %>%
+  # Select only the term ID and the p_values list-column
+  dplyr::select(GO_ID = term_id, p_values) %>%
+  # Ensure that each element in the p_values list-column is a numeric vector
+  dplyr::mutate(p_values = lapply(p_values, as.numeric)) %>%
+  # Spread each numeric vector in the p_values column into separate columns (one per condition)
+  tidyr::unnest_wider(p_values, names_sep = "_") %>%
+  # Rename the generated columns to match condition names used by GO compass
+  dplyr::rename(
+    `denovo` = p_values_1,
+    `degradation` = p_values_2
+  )
+
+# write data for gocompass
+write.table(x = temp1, file = file.path(here, "output", "stages_total_alterations_gprofiler.tsv"), row.names = F, col.names = T, sep = "\t")
+```
+
+## Sectional alterations classification
+```{r sectional alterations - gprofiler}
+# Define all profile labels of interest
+profile_labels <- c(
+  "Animal (all stages)",
+  "Extreme animal (3-dpf)",
+  "Extreme animal (early)",
+  "Extreme animal to vegetal",
+  "Extreme vegetal (post-1-hpf)",
+  "Vegetal (3-dpf)",
+  "Vegetal (all stages)",
+  "Vegetal (early)",
+  "Vegetal to Animal"
+)
+
+# Filter and extract valid rows once
+filtered <- profile_comparison %>%
+  filter(!is.na(fine_any_profile_changes), !is.na(zebrafish_human))
+
+# Create named list of gene vectors per profile category
+multiquery <- map(set_names(profile_labels), function(label) {
+  filtered %>%
+    filter(fine_any_profile_changes == label) %>%
+    distinct(zebrafish_human) %>%
+    pull(zebrafish_human)
+})
+
+# Get count of genes per profile category
+map_int(multiquery, length)
+
+# merge data across conditions
+GO_zebrafish[["sectional_classification"]][["multiquery_true"]] <- gost(query = multiquery,
+                              organism = "drerio", 
+                      ordered_query = FALSE, multi_query = TRUE, 
+                      significant = TRUE, exclude_iea = F,
+                      measure_underrepresentation = FALSE,
+                      evcodes = TRUE, user_threshold = 0.05,
+                      correction_method = "gSCS",
+                      domain_scope = "annotated",
+                      numeric_ns = "ENTREZGENE_ACC")
+
+# keep each analysis separate and show the genes of interest
+GO_zebrafish[["sectional_classification"]][["multiquery_false"]] <- gost(query = multiquery, 
+                              organism = "drerio", 
+                      ordered_query = FALSE, multi_query = F, 
+                      significant = TRUE, exclude_iea = F,
+                      measure_underrepresentation = FALSE,
+                      evcodes = TRUE, user_threshold = 0.05,
+                      correction_method = "gSCS",
+                      domain_scope = "annotated",
+                      numeric_ns = "ENTREZGENE_ACC")
+```
+```{r sectional alterations - gocompass}
+# create files for go_compass
+temp1 <- GO_zebrafish[["sectional_classification"]][["multiquery_true"]]$result %>%
+  as.data.frame() %>%
+  # Keep only rows where the annotation source is Gene Ontology Biological Process
+  dplyr::filter(source == "GO:BP") %>%
+  # Select only the term ID and the p_values list-column
+  dplyr::select(GO_ID = term_id, p_values) %>%
+  # Ensure that each element in the p_values list-column is a numeric vector
+  dplyr::mutate(p_values = lapply(p_values, as.numeric)) %>%
+  # Spread each numeric vector in the p_values column into separate columns (one per condition)
+  tidyr::unnest_wider(p_values, names_sep = "_") %>%
+  # Rename the generated columns to match condition names used by GO compass
+  dplyr::rename(
+    "Animal (all stages)" = p_values_1,
+    "Extreme animal (3-dpf)" = p_values_2,
+    "Extreme animal (early)" = p_values_3, 
+    "Extreme animal to vegetal" = p_values_4,
+    "Extreme vegetal (post-1-hpf) " = p_values_5, 
+    "Vegetal (3-dpf)" = p_values_6,
+    "Vegetal (all stages)" = p_values_7,
+    "Vegetal (early)" = p_values_8, 
+    "Vegetal to Animal" = p_values_9
+  )
+
+# write data for gocompass
+write.table(x = temp1, file = file.path(here, "output", "sectional_classification_gprofiler.tsv"), row.names = F, col.names = T, sep = "\t")
+```
+
+# **decoupleR**
+```{r pathway activities}
+# prepare input matrix for decoupleR
+expression_matrix <- assay(rld$blind$full_profile_changes)
+
+# Estimate pathway activities
+# Rename query gene id of expression matrix to orthologous human gene names
+# extract the DLTs
+temp1 <- profile_comparison
+# only annotated data
+temp1 <- temp1[!is.na(temp1$human),]
+
+# Now do the join using the "gene_id" column
+expression_matrix <- expression_matrix[rownames(expression_matrix) %in% temp1$gene_id,]
+expression_matrix <- expression_matrix %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column(var = "gene_id")
+
+expression_matrix <- expression_matrix %>%
+  dplyr::left_join(y = temp1[, c("gene_id", "human")], 
+            by = "gene_id")
+
+# Collapse duplicated genes by their human ortholog,
+# summing their expression values across all numeric columns
+expression_matrix <- expression_matrix %>%
+  # Remove rows with missing 'human' first
+  filter(!is.na(human)) %>%
+  # Group rows by the 'human' gene symbol
+  group_by(human) %>%
+  # Sum and round all numeric expression values
+  summarise(across(where(is.numeric), ~ round(sum(.))), .groups = "drop") %>%
+  # Convert the 'human' column to row names
+  tibble::column_to_rownames("human")
+
+# Load regulatory resource
+net <- decoupleR::get_progeny(organism = 'human', 
+                              top = 500)
+
+# Estimate Regulator Activities using Multivariate Linear Modeling (MLM)
+sample_acts <- decoupleR::run_mlm(mat = as.matrix(expression_matrix), 
+                                  net = net, 
+                                  .source = 'source', 
+                                  .target = 'target',
+                                  .mor = 'weight', 
+                                  minsize = 5)
+
+# Transform to wide matrix
+sample_acts_mat <- sample_acts %>%
+                   tidyr::pivot_wider(id_cols = 'condition', 
+                                      names_from = 'source',
+                                      values_from = 'score') %>%
+                   tibble::column_to_rownames('condition') %>%
+                   as.matrix()
+
+# get the averaged pathway score across the replicates
+tf_auc <- t(sample_acts_mat)
+temp11 <- samplesDESeq$full_profile_changes
+temp11$stage_section <- paste0(temp11$Stage, "_", temp11$Position)
+temp12 <- temp11$stage_section
+names(temp12) <- rownames(temp11)
+tf_zscore <- CalcStats(tf_auc, f = temp12, n = 20, order = "p", method = "mean")
+```
+```{r heat map of pathway activity}
+# Heatmap(tf_zscore, lab_fill = "zscore")
+mat <- tf_zscore
+
+# Order columns by metadata
+order_by <- temp11$stage_section
+ordered_cols <- order(order_by)
+
+# Create annotation for samples
+my_sample_col <- data.frame(row.names = colnames(mat),
+  stage = gsub(pattern = "_[A-E].*", replacement = "", colnames(mat)),
+  position = gsub(pattern = ".*_", replacement = "", colnames(mat))
+)
+my_sample_col$stage <- factor(my_sample_col$stage, levels = c("0_hpf", "1_hpf", "1_dpf", "3_dpf"))
+my_sample_col$position <- factor(my_sample_col$position, levels = c("A", "B", "C", "D", "E"))
+
+# Define annotation colors
+ann_colors <- list(
+    stage =  c('0 hpf'="#F8766D", '1 hpf'="#7CAE00", '1 dpf'="#00BFC4", '3 dpf'="#C77CFF"),
+    position =  c("A" = "#9D88C1", "B" = "#CCC8E1", "C" = "#e2ccc0", "D" = "#FED098", "E" = "#F2AB79")
+)
+
+my_sample_col$stage <- gsub(pattern = "_", replacement = " ", x = my_sample_col$stage)
+my_sample_col$stage <- factor(my_sample_col$stage, levels = c("0_hpf", "1_hpf", "1_dpf", "3_dpf"))
+
+# Create row annotation
+row_ha <- rowAnnotation(
+  df = my_sample_col,
+  col = ann_colors,
+  simple_anno_size = unit(3, "mm"),
+  annotation_name_gp = gpar(fontsize = 0),
+  annotation_legend_param = list(
+    title_gp = gpar(fontsize = 10),
+    labels_gp = gpar(fontsize = 10),
+    legend_height = unit(c(1, 1), "cm")
+  ),
+  annotation_name = NULL
+)
+
+# Define breaks and color palette
+breaks_list <- seq(-2, 2, by = 0.01)
+heatmap_colors <- colorRampPalette(rev(brewer.pal(n = 7, name = "BrBG")))(length(breaks_list))
+
+# row-wise z-score normalization
+temp102 <- t(apply(mat, 1, function(x) {
+  if (sd(x, na.rm = TRUE) == 0) {
+    return(rep(0, length(x)))  # Replace constant rows with zeros
+  } else {
+    return(scale(x))
+  }
+}))
+colnames(temp102) <- colnames(mat)
+
+# Generate the heatmap
+temp300 <- ComplexHeatmap::pheatmap(
+  mat = t(as.matrix(temp102)), 
+  scale = "none", 
+  cluster_rows = FALSE, 
+  cluster_cols = TRUE, 
+  show_rownames = FALSE, 
+  show_colnames = TRUE , 
+  color = heatmap_colors,
+  treeheight_row = 0, 
+  treeheight_col = 0, 
+  left_annotation = row_ha,
+  show_row_dend = FALSE,
+  show_column_dend = FALSE,
+  row_split = as.factor(my_sample_col$stage),  # Keeps grouping but without visible titles
+  fontsize = 10, 
+  fontface = "plain",
+  column_title = NULL,  
+  row_title = NULL,
+  name = NULL,
+  fontfamily = "Arial",
+  legend = TRUE,         
+  annotation_legend = FALSE,
+  breaks = breaks_list, 
+  use_raster = FALSE, 
+  border = NA,
+  column_names_side = "top"
+)
+```
+
+# **Cleanup and save object**
+```{r save individual objects}
+# Set up parallel plan
+plan(multicore)  # Efficient fork-based parallelism on Linux
+
+# List of object names to save
+object_names <- c("GO_zebrafish",
+                  "sample_acts")
+
+# Parallel saving loop
+future_lapply(object_names, function(name1) {
+  # Construct full file path with .qs2 extension
+  file_path <- file.path(here, "output", paste0(name1, ".qs2"))
+  
+  # Save the object by name using qs with multithreading
+  qs2::qs_save(get(name1), file = file_path,
+               compress_level = 3,
+               nthreads = parallel::detectCores() - 1)
+})
+
+# Reset plan to sequential after completion
+plan(sequential)
+```
+```{r load a particular object only}
+# Define the file path where your saved list is stored
+file_path <- file.path(here, "output", "GO_zebrafish.qs2")
+
+# Load the entire list of objects
+GO_zebrafish <- qs2::qs_read(file_path, 
+                      validate_checksum = TRUE,
+                      nthreads = parallel::detectCores()-1)
+```

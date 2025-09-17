@@ -1,0 +1,861 @@
+---
+title: "Orthology"
+author: "Ravindra Naraine"
+date: "March 03, 2025"
+subtitle: "Orthology"
+abstract: |
+  This notebook is designed to accompany the analysis described in **RNA redistribution driven by alterations in transcription during early embryogenesis of rainbow trout**. It presents the identification and curation of protein-coding orthologs between query species (*Oncorhynchus mykiss* or *Salvelinus fontinalis*) and reference species (*Danio rerio* or *Homo sapiens*), focusing on transcripts with significant spatial expression differences identified by DESeq2 and TrendCatcher. Orthologs were inferred using Proteinortho and further refined using NCBI, Ensembl BioMart, and orthogene-based mappings. Shown are the major parts of the code to obtain the ortholog info from either protein comparison or comparative databases.
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+# **Protein orthology**
+```{r setup, include=TRUE, cache=TRUE}
+# location of working folder
+here <- "./05_orthology/"
+```
+
+# **Install and Load Required Libraries**
+```{r libraries, echo=FALSE, message=FALSE, warning=FALSE}
+# Set memory limit for Java and reproducibility seed
+options(java.parameters = "-Xmx30000m")
+set.seed(100)
+
+# List of required packages (from CRAN and Bioconductor)
+required_packages <- c("xlsx", "doParallel", "future", 
+                       "DESeq2", "biomaRt", "org.Hs.eg.db", 
+                       "qs2", "future.apply", "psych",
+                       "Biostrings", "stringr", "tidyr",
+                       "foreach", "orthogene", "tidyverse")
+
+# Apply the function to load required packages
+invisible(lapply(required_packages, function(x) {
+  suppressPackageStartupMessages(library(x, character.only = TRUE))
+}))
+```
+
+# **Load in profile comparison object**
+```{r load DESeq2 objects}
+# Define the file path where your saved list is stored
+file_path <- file.path(here, "../04_clustering", "output")
+
+# Load profile comparison data
+profile_comparison <- qs2::qs_read(file.path(file_path, "profile_comparison.qs2"),
+                      validate_checksum = TRUE,
+                      nthreads = parallel::detectCores()-1)
+```
+
+# **Define paths to protein sequences**
+```{r reference and query}
+config_links <- list()
+
+genome_dir <- "~/genomes/"
+
+# link to reference dataset
+# Zebrafish reference: Danio rerio (GCF_000002035.6_GRCz11)
+# Human reference: Homo sapiens (GCF_000001405.40_GRCh38.p14)
+config_links$reference_protein_link <- paste0(genome_dir, "zebrafish_danio_rerio/ncbi/20250103_GCF_000002035.6/protein.faa")
+config_links$reference_feature_table_link <- paste0(genome_dir, "zebrafish_danio_rerio/ncbi/20250103_GCF_000002035.6/GCF_000002035.6_GRCz11_feature_table.txt")
+
+# link to query dataset
+# Trout TOMOSeq: Oncorhynchus mykiss (GCF_013265735.2)
+# Trout-hybrid TOMOSeq: Salvelinus fontinalis (GCF_029448725.1_ASM2944872)
+config_links$query_protein_link <- paste0(genome_dir, "trout_Oncorhynchus_mykiss/ncbi/20240226_GCF_013265735.2/protein.faa")
+config_links$query_feature_table_link <- paste0(genome_dir, "trout_Oncorhynchus_mykiss/ncbi/20240226_GCF_013265735.2/GCF_013265735.2_feature_table.txt")
+
+# link to NCBI gene2ortholog 
+# downloaded from https://ftp.ncbi.nlm.nih.gov/gene/DATA/ and filtered to keep query and reference
+# filter data to only zebrafish and trout taxonomy ids
+config_links$gene2_ortholog_link <- paste0(genome_dir, "zebrafish_danio_rerio/ncbi/20250103_GCF_000002035.6/gene2ortholog/zebrafish_trout")
+
+# link to NCBI gene2ensembl 
+# downloaded from https://ftp.ncbi.nlm.nih.gov/gene/DATA/ and filtered to keep query
+# filter data to trout taxonomy ids
+config_links$gene2ensembl_link <- paste0(genome_dir, "/trout_Oncorhynchus_mykiss/ncbi/20240226_GCF_013265735.2/gene2ensembl/trout.txt")
+
+# import biomart orthology data between query and reference
+# https://www.ensembl.org/biomart/martview/dced9f9076cade6e397a64c004a8d08b
+config_links$biomart_orthology_link <- paste0(genome_dir, "trout_Oncorhynchus_mykiss/biomart/mart_export.txt")
+```
+
+# **Export protein sequence for query genes with missing reference annotations**
+```{r export missing genes for ortho analysis}
+# load in reference feature table
+reference_feature_table <- read.csv(file = config_links$reference_feature_table_link, 
+                                    header = T, sep = "\t", stringsAsFactors = FALSE)
+reference_feature_table$related_accession[grepl(pattern = "^$", x = reference_feature_table$related_accession)] <- NA
+reference_feature_table$product_accession[grepl(pattern = "^$", x = reference_feature_table$product_accession)] <- NA
+reference_feature_table$symbol[grepl(pattern = "^$", x = reference_feature_table$symbol)] <- NA
+
+# extract query transcript id, gene id and protein id from feature table
+query_feature_table <- read.delim(file = config_links$query_feature_table_link, 
+                       sep = "\t", header = T)
+query_feature_table$related_accession[grepl(pattern = "^$", x = query_feature_table$related_accession)] <- NA
+query_feature_table$symbol[grepl(pattern = "^$", x = query_feature_table$symbol)] <- NA
+
+# read in query amino acid fasta file
+query_proteins <- readAAStringSet(filepath = config_links$query_protein_link, format = "fasta")
+names(query_proteins) <- gsub(pattern = " .*", replacement = "", x = names(query_proteins))
+query_proteins <- gsub(pattern = "\\.$|\\*$", replacement = "", x = query_proteins)
+query_proteins <- AAStringSet(x = query_proteins)
+
+gene_interest <- union(profile_comparison_trout$gene_id, profile_comparison_hybrid$gene_id[profile_comparison_hybrid$genome %in% "genome1"])
+length(gene_interest)
+
+# filter genes by DLTs
+query_feature_table <- query_feature_table[toupper(query_feature_table$symbol) %in% toupper(gene_interest),]
+length(unique(query_feature_table$symbol))
+
+# write proteins filtered for DLTs
+query_proteins <- query_proteins[toupper(names(query_proteins)) %in% toupper(query_feature_table$related_accession)]
+query_proteins <- AAStringSet(x = query_proteins)
+length(query_proteins)
+
+dir.create(path = file.path(here, "output"), showWarnings = F, recursive = T)
+writeXStringSet(x = query_proteins, filepath = file.path(here, "output", "query_filtered_proteins.faa"))
+```
+
+# **Run Proteinortho step by step**
+```{bash Proteinortho}
+# mamba create -n proteinortho -c bioconda proteinortho=6.0.31
+# mamba activate proteinortho
+# proteinortho version: 6.0.31; diamond v.2.1.9
+BINPATH="/home/rn/miniforge3/envs/proteinortho/bin/"
+reference_protein_link="~/genomes/zebrafish_danio_rerio/ncbi/20250103_GCF_000002035.6/protein.faa"
+query_filtered_proteins_link="~/05_orthology/output/query_filtered_proteins.faa"
+
+# step one: prepare blast (build db)
+proteinortho \
+  -project=contrast \
+  -cpus=16 \
+  -verbose=1 \
+  -singles \
+  -checkfasta "$reference_protein_link" "$query_filtered_proteins_link" \
+  --isoform=ncbi \
+  -binpath="$BINPATH" \
+  -p=diamond \
+  -step=1
+
+# step two: run all-versus-all blast
+proteinortho \
+  -project=contrast \
+  -cpus=16 \
+  -verbose=1 \
+  -singles \
+  -checkfasta "$reference_protein_link" "$query_filtered_proteins_link" \
+  --isoform=ncbi \
+  -binpath="$BINPATH" \
+  -p=diamond \
+  -step=2
+
+# step three: run the clustering
+proteinortho \
+  -project=contrast \
+  -cpus=16 \
+  -verbose=1 \
+  -singles \
+  -checkfasta "$reference_protein_link" "$query_filtered_proteins_link" \
+  --isoform=ncbi \
+  -binpath="$BINPATH" \
+  -p=diamond \
+  -step=3
+```
+
+# **Import protein ortholog data**
+```{r import protein ortholog}
+# read in proteinortho data
+ortholog_ref <- read.csv2(file = file.path(here, "output", "contrast.proteinortho.tsv"), 
+                          header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+# add a unique ortho_id to each entry
+ortholog_ref <- cbind(data.frame("unique_id" = 1:nrow(ortholog_ref)), ortholog_ref)
+
+# remove any white spacing flanking the data
+ortholog_ref <- data.frame(apply(X = ortholog_ref, MARGIN = 2, function(x) trimws(x, which = c("both"))))
+colnames(ortholog_ref)[5] <- "reference_protein.faa"
+colnames(ortholog_ref)[6] <- "query_protein.faa"
+```
+
+# **Filter through the orthologs**
+```{r many query transcripts that map only one reference transcripts}
+# select query proteins that mapped to only one reference protein 
+temp1 <- ortholog_ref[!grepl(pattern = ",", x = ortholog_ref$reference_protein.faa),]
+temp1 <- temp1 %>%
+  select(all_of(c("unique_id", "query_protein.faa", "reference_protein.faa")))
+temp2 <- stringr::str_split(string = temp1$query_protein.faa, pattern = ",", simplify = TRUE)
+
+# split the multiple query genes into their own rows
+temp4 <- data.frame()
+temp4 <- do.call(rbind, mapply(function(id, query, ref) {
+  # Convert single-row data frame to character vector
+  query_vec <- unlist(query, use.names = FALSE)
+  
+  # Remove NAs, empty strings, zeros
+  query_clean <- query_vec[!(is.na(query_vec) | query_vec == "")]
+  
+  if (length(query_clean) > 0) {
+    data.frame("ortho_number" = id, "query" = query_clean, "reference" = ref)
+  } else {
+    NULL
+  }
+}, temp1$unique_id, split(temp2, row(temp2)), temp1$reference_protein.faa, SIMPLIFY = FALSE))
+
+# Make a cluster
+cl <- makeCluster(parallel::detectCores() - 1)
+# Register it with foreach
+registerDoParallel(cl)
+
+# obtain the gene symbol for the reference gene transcripts
+temp4$reference_symbols <- foreach(name1 = 1:nrow(temp4), .combine = c, .packages = 'base') %dopar% {
+  temp5 <- reference_feature_table$symbol[reference_feature_table$product_accession %in% temp4$reference[name1]]
+  paste0(unique(temp5), collapse = ", ")
+}
+temp4$reference_symbols[grepl(pattern = "^$", x = temp4$reference_symbols)] <- NA
+length(grep(pattern = ",", x = temp4$reference_symbols))
+
+# store data
+temp6_1 <- temp4
+nrow(temp6_1)
+
+# Clean up
+stopCluster(cl)
+```
+```{r single query transcripts that map to many reference transcripts}
+# extract single query transcripts that map to several reference transcripts
+temp1 <- ortholog_ref[grepl(pattern = ",", x = ortholog_ref$reference_protein.faa),]
+temp1 <- temp1 %>%
+  select(all_of(c("unique_id", "query_protein.faa", "reference_protein.faa"))) %>%
+  filter(!grepl(",", query_protein.faa))
+temp2 <- stringr::str_split(string = temp1$reference_protein.faa, pattern = ",", simplify = TRUE)
+
+# split the multiple reference genes into their own rows
+temp4 <- data.frame()
+temp4 <- do.call(rbind, mapply(function(id, query, ref) {
+  # Convert single-row data frame to character vector
+  ref_vec <- unlist(ref, use.names = FALSE)
+  
+  # Remove NAs, empty strings, zeros
+  ref_clean <- ref_vec[!(is.na(ref_vec) | ref_vec == "")]
+  
+  if (length(ref_clean) > 0) {
+    data.frame("ortho_number" = id, "query" = query, "reference" = ref_clean)
+  } else {
+    NULL
+  }
+}, temp1$unique_id, temp1$query_protein.faa, split(temp2, row(temp2)), SIMPLIFY = FALSE))
+
+# Make a cluster
+cl <- makeCluster(parallel::detectCores() - 1)
+# Register it with foreach
+registerDoParallel(cl)
+
+# obtain the gene symbol for the reference gene transcripts
+temp4$reference_symbols <- foreach(name1 = 1:nrow(temp4), .combine = c, .packages = 'base') %dopar% {
+  temp5 <- reference_feature_table$symbol[grep(pattern = temp4$reference[name1], x = reference_feature_table$product_accession)]
+  paste0(unique(temp5), collapse = ", ")
+}
+
+# check if all the reference gene symbols for the unique query number is the same
+sum(duplicated(temp4$reference_symbols)) 
+sum(duplicated(temp4$ortho_number)) 
+sum(duplicated(temp4$query)) 
+temp5 <- NULL
+temp5 <- foreach(name1 = unique(temp4$ortho_number), .combine = rbind) %dopar% {
+  temp5 <- temp4[temp4$ortho_number %in% name1,]
+  if(length(unique(temp5$reference_symbols)) == 1){
+    # there is only one symbol for all the references
+    temp5 <- data.frame("ortho_number" = name1, "query" = temp5$query[1], 
+                        "reference" = paste0(temp5$reference, collapse = ","), 
+                        "reference_symbols" = paste0(unique(temp5$reference_symbols), collapse = ","))
+  }else{
+    # there are many symbols for all the references
+    temp5 <- data.frame("ortho_number" = name1, "query" = temp5$query[1], 
+                        "reference" = paste0(temp5$reference, collapse = ","), 
+                        "reference_symbols" = paste0(unique(temp5$reference_symbols), collapse = ","))
+  }
+  temp5
+}
+temp5$reference_symbols <- gsub(pattern = ",$", replacement = "", x = temp5$reference_symbols)
+temp5$reference_symbols <- gsub(pattern = "^,", replacement = "", x = temp5$reference_symbols)
+temp5$reference_symbols <- gsub(",+", ",", temp5$reference_symbols)
+temp5$reference_symbols[grepl(pattern = "^$", x = temp5$reference_symbols)] <- NA
+
+sum(duplicated(temp5$reference_symbols)) 
+sum(duplicated(temp5$query)) 
+length(grep(pattern = ",", x = temp5$reference_symbols)) 
+
+# check if query gene symbol can be found in the list of reference symbols matching to one query gene id
+# add query gene symbol
+temp5$query_symbols <- query_feature_table$symbol[match(toupper(temp5$query), toupper(query_feature_table$related_accession))]
+# subset to the queries maoped to many reference symbols
+temp6 <- temp5[grepl(pattern = ",", x = temp5$reference_symbols),]
+temp2 <- stringr::str_split(string = temp6$reference_symbols, pattern = ",", simplify = TRUE)
+
+# for each multimapped query, check if query symbol can be found in reference symbol and add as official reference symbol
+# if cannot find use the first mapped reference symbol from proteinortho
+temp7 <- foreach(name1 = 1:nrow(temp6), .combine = rbind) %dopar% {
+  temp7 <- temp6[name1,]
+  temp8 <- NULL
+  temp8 <- unique(temp2[name1,][temp2[name1,] %in% temp7$query_symbols])
+  if(purrr::is_empty(temp8) == TRUE){
+    temp7$reference_symbols <- temp2[name1,1]
+  }else{
+    temp7$reference_symbols <- temp8
+  }
+  temp7
+}
+temp7$reference_symbols <- gsub(",+", ",", temp7$reference_symbols)
+temp7$reference_symbols <- gsub(pattern = ",$", replacement = "", x = temp7$reference_symbols)
+temp7$reference_symbols <- gsub(pattern = "^,", replacement = "", x = temp7$reference_symbols)
+temp7$reference_symbols[grepl(pattern = "^$", x = temp7$reference_symbols)] <- NA
+
+temp5 <- temp5[!grepl(pattern = ",", x = temp5$reference_symbols),]
+temp5 <- rbind(temp5, temp7)
+temp5$reference_symbols[grepl(pattern = "^$", x = temp5$reference_symbols)] <- NA
+
+# store data
+temp6_2 <- temp5
+temp6_2$query_symbols <- NULL
+nrow(temp6_2) 
+
+# Clean up
+stopCluster(cl)
+```
+```{r extract many query transcripts that map to many reference transcripts}
+# extract single query transcripts that map to several reference transcripts
+temp1 <- ortholog_ref[grepl(pattern = ",", x = ortholog_ref$reference_protein.faa),]
+temp1 <- temp1 %>%
+  select(all_of(c("unique_id", "query_protein.faa", "reference_protein.faa"))) %>%
+  filter(grepl(",", query_protein.faa))
+temp2 <- stringr::str_split(string = temp1$reference_protein.faa, pattern = ",", simplify = TRUE)
+
+# split the multiple reference genes into their own rows
+temp4 <- data.frame()
+temp4 <- do.call(rbind, mapply(function(id, query, ref) {
+  # Convert single-row data frame to character vector
+  ref_vec <- unlist(ref, use.names = FALSE)
+  
+  # Remove NAs, empty strings, zeros
+  ref_clean <- ref_vec[!(is.na(ref_vec) | ref_vec == "")]
+  
+  if (length(ref_clean) > 0) {
+    data.frame("ortho_number" = id, "query" = query, "reference" = ref_clean)
+  } else {
+    NULL
+  }
+}, temp1$unique_id, temp1$query_protein.faa, split(temp2, row(temp2)), SIMPLIFY = FALSE))
+
+# Make a cluster
+cl <- makeCluster(parallel::detectCores() - 1)
+# Register it with foreach
+registerDoParallel(cl)
+
+# obtain the gene symbol for the reference gene transcripts
+temp4$reference_symbols <- foreach(name1 = 1:nrow(temp4), .combine = c, .packages = 'base') %dopar% {
+  temp5 <- reference_feature_table$symbol[grep(pattern = temp4$reference[name1], x = reference_feature_table$product_accession)]
+  paste0(unique(temp5), collapse = ", ")
+}
+
+# check if all the reference gene symbols for the unique query number is the same
+sum(duplicated(temp4$reference_symbols)) 
+sum(duplicated(temp4$ortho_number)) 
+sum(duplicated(temp4$query))
+temp5 <- NULL
+temp5 <- foreach(name1 = unique(temp4$ortho_number), .combine = rbind) %dopar% {
+  temp5 <- temp4[temp4$ortho_number %in% name1,]
+  if(length(unique(temp5$reference_symbols)) == 1){
+    # there is only one symbol for all the references
+    temp5 <- data.frame("ortho_number" = name1, "query" = temp5$query[1], "reference" = paste0(temp5$reference, collapse = ","), "reference_symbols" = paste0(unique(temp5$reference_symbols), collapse = ","))
+  }else{
+    # there are many symbols for all the references
+    temp5 <- data.frame("ortho_number" = name1, "query" = temp5$query[1], "reference" = paste0(temp5$reference, collapse = ","), "reference_symbols" = paste0(unique(temp5$reference_symbols), collapse = ","))
+  }
+  temp5
+}
+
+temp5$reference_symbols <- gsub(pattern = ",$", replacement = "", x = temp5$reference_symbols)
+temp5$reference_symbols <- gsub(pattern = "^,", replacement = "", x = temp5$reference_symbols)
+temp5$reference_symbols <- gsub(",+", ",", temp5$reference_symbols)
+temp5$reference_symbols[grepl(pattern = "^$", x = temp5$reference_symbols)] <- NA
+
+# split the multiple query genes into their own rows
+temp2 <- stringr::str_split(string = temp5$query, pattern = ",", simplify = TRUE)
+temp4 <- data.frame()
+temp4 <- do.call(rbind, mapply(function(id, query, ref, ref_symbol) {
+  # Convert single-row data frame to character vector
+  query_vec <- unlist(query, use.names = FALSE)
+  
+  # Remove NAs, empty strings, zeros
+  query_clean <- query_vec[!(is.na(query_vec) | query_vec == "")]
+  
+  if (length(query_clean) > 0) {
+    data.frame("ortho_number" = id, "query" = query_clean, "reference" = ref, "reference_symbols" = ref_symbol)
+  } else {
+    NULL
+  }
+}, temp5$ortho_number, split(temp2, row(temp2)), temp5$reference, temp5$reference_symbols, SIMPLIFY = FALSE))
+
+# check if query gene symbol can be found in the list of reference symbols matching to one query gene id
+# add query gene symbol
+temp5 <- temp4
+temp5$query_symbols <- query_feature_table$symbol[match(toupper(temp5$query), toupper(query_feature_table$related_accession))]
+# subset to the queries maoped to many reference symbols
+temp6 <- temp5[grepl(pattern = ",", x = temp5$reference_symbols),]
+temp2 <- stringr::str_split(string = temp6$reference_symbols, pattern = ",", simplify = TRUE)
+
+# for each multimapped query, check if query symbol can be found in reference symbol and add as official reference symbol
+# if cannot find use the first mapped reference symbol from proteinortho
+temp7 <- foreach(name1 = 1:nrow(temp6), .combine = rbind) %dopar% {
+  temp7 <- temp6[name1,]
+  temp8 <- NULL
+  temp8 <- unique(temp2[name1,][temp2[name1,] %in% temp7$query_symbols])
+  if(purrr::is_empty(temp8) == TRUE){
+    temp7$reference_symbols <- temp2[name1,1]
+  }else{
+    temp7$reference_symbols <- temp8
+  }
+  temp7
+}
+temp7$reference_symbols <- gsub(",+", ",", temp7$reference_symbols)
+temp7$reference_symbols <- gsub(pattern = ",$", replacement = "", x = temp7$reference_symbols)
+temp7$reference_symbols <- gsub(pattern = "^,", replacement = "", x = temp7$reference_symbols)
+temp7$reference_symbols[grepl(pattern = "^$", x = temp7$reference_symbols)] <- NA
+
+temp5 <- temp5[!grepl(pattern = ",", x = temp5$reference_symbols),]
+temp5 <- rbind(temp5, temp7)
+temp5$reference_symbols[grepl(pattern = "^$", x = temp5$reference_symbols)] <- NA
+
+# store data
+temp6_3 <- temp5
+temp6_3$query_symbols <- NULL
+nrow(temp6_3) #11936
+
+# Clean up
+stopCluster(cl)
+```
+```{r merge the data together}
+# create dataframe of annotated queries
+temp7 <- rbind(temp6_1, temp6_2, temp6_3)
+nrow(temp7)
+
+# Ensure reference_symbols is a character vector
+temp7 <- temp7 %>%
+  mutate(reference_symbols = as.character(reference_symbols))
+
+# add query nucleotide accession number
+temp7$query_nuc_accession <- query_feature_table$product_accession[match(toupper(temp7$query), toupper(query_feature_table$related_accession))]
+
+# add query gene symbol
+temp7$query_gene_symbol <- query_feature_table$symbol[match(toupper(temp7$query), toupper(query_feature_table$related_accession))]
+
+# Keep only those query_gene_symbols with exactly one unique reference_symbol
+temp8 <- temp7 %>%
+  group_by(query_gene_symbol) %>%
+  filter(n_distinct(reference_symbols) == 1) %>%
+  dplyr::slice(1) %>%
+  ungroup()
+
+# Get the excluded query_gene_symbols (mapped to many different reference symbols)
+temp11 <- temp7 %>%
+  group_by(query_gene_symbol) %>%
+  filter(n_distinct(reference_symbols) > 1) %>%
+  distinct(query_gene_symbol) %>%
+  pull(query_gene_symbol)
+
+# select most likely reference symbol for the query symbols with several different reference symbols
+# select the reference symbol that matches the query symbol
+if(length(temp11) > 0){
+  temp12 <- NULL
+  for(name1 in temp11){
+    temp9 <- NULL
+    temp9 <- temp7[temp7$query_gene_symbol %in% name1,]
+    temp9 <- temp9[toupper(temp9$reference_symbols) %in% toupper(temp9$query_gene_symbol),]
+    temp10 <- unique(temp9$reference_symbols)
+    if(length(temp10) == 1){
+      temp8 <- rbind(temp8, temp9[1,])
+    }else{
+      temp12 <- c(temp12, name1)
+    }
+  }
+}
+
+# select most likely reference symbol for the query symbols with several different reference symbols
+# select the first reference gene symbol from the list of different symbols
+if(length(temp12) > 0){
+  for(name1 in temp12){
+    temp9 <- NULL
+    temp9 <- temp7[temp7$query_gene_symbol %in% name1,]
+    temp10 <- unique(temp9$reference_symbols)
+    temp9$reference_symbols[1] <- temp10[1]
+    temp8 <- rbind(temp8, temp9[1,])
+  }
+}
+
+protein_ortho_query_reference <- temp8
+nrow(protein_ortho_query_reference) 
+sum(duplicated(protein_ortho_query_reference$query_gene_symbol)) 
+```
+
+# **Add the official reference orthologs to the query dataset**
+```{r gene2orthlog}
+# load gene2orthlog info
+gene2_ortholog <- read.csv(file = config_links$gene2_ortholog_link, header = T, sep = "\t")
+# subset to DLTs only
+gene2_ortholog <- gene2_ortholog[toupper(gene2_ortholog$Other_GeneID) %in% toupper(query_feature_table$GeneID),]
+
+# add gene symbol for reference gene id
+gene2_ortholog$official_reference_ortholog_1 <- reference_feature_table$symbol[match(toupper(gene2_ortholog$GeneID), toupper(reference_feature_table$GeneID))]
+
+# add gene symbol for query gene id
+gene2_ortholog$official_query_ortholog_1 <- query_feature_table$symbol[match(toupper(gene2_ortholog$Other_GeneID), toupper(query_feature_table$GeneID))]
+gene2_ortholog <- gene2_ortholog[!is.na(gene2_ortholog$official_query_ortholog_1),]
+
+# add the official ortholog data to finalized table
+protein_ortho_query_reference$official_reference_ortholog_1 <- gene2_ortholog$official_reference_ortholog_1[match(toupper(protein_ortho_query_reference$query_gene_symbol), toupper(gene2_ortholog$official_query_ortholog_1))]
+```
+
+# **Start curating the data: gene2ortholog, proteinortho**
+```{r}
+# check entries official ortholog data from gene2ortholog
+temp1 <- protein_ortho_query_reference[!is.na(protein_ortho_query_reference$official_reference_ortholog_1),]
+temp1$ortho_cat <- "gene2ortho"
+nrow(temp1)
+
+# entries with proteinortho data but no official orthology data
+temp2 <- protein_ortho_query_reference[is.na(protein_ortho_query_reference$official_reference_ortholog_1),]
+temp2_1 <- temp2[!is.na(temp2$reference_symbols),]
+temp2_1$official_reference_ortholog_1 <- temp2_1$reference_symbols
+temp2_1$ortho_cat <- "proteinortho"
+nrow(temp2_1)
+
+# store final ortholog info
+ortholog_final <- rbind(temp1, temp2_1)
+ortholog_final$GeneID <- NA
+ortholog_final <- data.frame(ortholog_final)
+
+# add gene2ortholog genes that are not in proteinortho data
+temp1 <- gene2_ortholog %>% 
+  filter(!is.na(official_reference_ortholog_1) &
+           !is.na(official_query_ortholog_1))
+temp1 <- temp1[!(temp1$official_query_ortholog_1 %in% ortholog_final$query_gene_symbol),]
+nrow(temp1) #57
+temp2 <- NULL
+if(nrow(temp1) > 0){
+  temp2 <- data.frame("ortho_number" = "gene2ortho", "query" = NA, 
+             "reference" = NA, "reference_symbols" = NA, 
+             "query_nuc_accession" = NA, "query_gene_symbol" = temp1$official_query_ortholog_1,
+             "official_reference_ortholog_1" = temp1$official_reference_ortholog_1, 
+             "ortho_cat" = "gene2ortho", "GeneID" = temp1$Other_GeneID)
+}
+nrow(temp2)
+ortholog_final <- rbind(ortholog_final, temp2)
+
+# missing reference symbols for query transcripts
+missing_genes <- query_feature_table[!(query_feature_table$symbol %in% ortholog_final$query_gene_symbol),]
+nrow(missing_genes) 
+```
+
+# **Check missing genes using ortholog databases**
+```{r import from biomart}
+# check query official ensembl id from gene2ensembl
+query_gene2ensembl <- read.csv(file = config_links$gene2ensembl_link, header = T, sep = "\t", stringsAsFactors = F)
+
+# subset the ensembl id to only missing genes
+query_gene2ensembl <- query_gene2ensembl[query_gene2ensembl$protein_accession.version %in% missing_genes$related_accession,]
+
+# import biomart orthology data between query and reference
+biomart_orthology <- read.csv(file = config_links$biomart_orthology_link, header = T, sep = "\t", stringsAsFactors = F)
+
+# add ortholog reference gene symbol
+query_gene2ensembl$zebrafish <- biomart_orthology$Zebrafish.gene.name[match(toupper(query_gene2ensembl$Ensembl_rna_identifier), toupper(biomart_orthology$Transcript.stable.ID.version))]
+
+# fill in missing reference symbol in the query missing gene dataset
+temp3 <- missing_genes[missing_genes$related_accession %in% query_gene2ensembl$protein_accession.version,]
+temp3$official_reference_ortholog_1 <- query_gene2ensembl$zebrafish[match(toupper(temp3$related_accession), toupper(query_gene2ensembl$protein_accession.version))]
+temp3$official_reference_ortholog_1 <- gsub(pattern = "^$", replacement = NA, x = temp3$official_reference_ortholog_1)
+temp4 <- temp3[!is.na(temp3$official_reference_ortholog_1),]
+
+# for found reference symbols, add to final ortholog dataset
+temp2 <- NULL
+if(nrow(temp4) > 0){
+  temp2 <- data.frame("ortho_number" = "biomart_orthology", "query" = temp4$related_accession, 
+             "reference" = NA, "reference_symbols" = NA, 
+             "query_nuc_accession" = temp4$product_accession, "query_gene_symbol" = temp4$symbol,
+             "official_reference_ortholog_1" = temp4$official_reference_ortholog_1, 
+             "ortho_cat" = "biomart_orthology", "GeneID" = temp4$GeneID)
+}
+nrow(temp2) 
+ortholog_final <- rbind(ortholog_final, temp2)
+
+# check missing genes
+missing_genes <- query_feature_table[!(query_feature_table$symbol %in% ortholog_final$query_gene_symbol),]
+nrow(missing_genes) 
+```
+```{r orthogene}
+# orthology datasets to check
+methods <- c("homologene", "gprofiler", "babelgene")
+
+# check which species are in dataset
+species_list <- lapply(methods, function(meth) {
+  df <- map_species(
+    method = meth,
+    use_local = FALSE,
+    verbose = FALSE
+  )
+  df$method <- meth
+  
+  # Ensure taxonomy_id is character
+  df$taxonomy_id <- as.character(df$taxonomy_id)
+  
+  return(df)
+})
+all_species <- bind_rows(species_list)
+
+# find reference symbpols for query genes with missing data
+gene_df <- orthogene::convert_orthologs(gene_df = data.frame("related_accession" = unique(missing_genes$related_accession)),
+                                        gene_input = "related_accession",
+                                        gene_output = "column", 
+                                        input_species = "omykiss",
+                                        output_species = "drerio",
+                                        non121_strategy = "keep_popular",
+                                        method = "gprofiler") 
+
+# fill in missing reference symbol in the query missing gene dataset
+temp4 <- missing_genes
+temp4$official_reference_ortholog_1 <- gene_df$ortholog_gene[match(toupper(temp4$related_accession), toupper(gene_df$input_gene))]
+temp4 <- temp4[!is.na(temp4$official_reference_ortholog_1),]
+
+# for found reference symbols, add to final ortholog dataset
+temp2 <- NULL
+if(nrow(temp4) > 0){
+  temp2 <- data.frame("ortho_number" = "orthogene", "query" = temp4$related_accession, 
+             "reference" = NA, "reference_symbols" = NA, 
+             "query_nuc_accession" = temp4$product_accession, "query_gene_symbol" = temp4$symbol,
+             "official_reference_ortholog_1" = temp4$official_reference_ortholog_1, 
+             "ortho_cat" = "orthogene", "GeneID" = temp4$GeneID)
+}
+nrow(temp2) 
+ortholog_final <- rbind(ortholog_final, temp2)
+
+# check missing genes
+missing_genes <- query_feature_table[!(query_feature_table$symbol %in% ortholog_final$query_gene_symbol),]
+nrow(missing_genes) 
+```
+
+# **check reference symbols for exact matches to query symbols**
+```{r match query symbols to reference feature table}
+# Make a cluster
+cl <- makeCluster(parallel::detectCores() - 1)
+# Register it with foreach
+registerDoParallel(cl)
+
+temp4 <- missing_genes
+# obtain the gene symbol for the reference gene transcripts
+temp4$reference_symbols <- foreach(name1 = 1:nrow(missing_genes), .combine = c, .packages = 'base') %dopar% {
+  temp5 <- reference_feature_table$symbol[toupper(reference_feature_table$symbol) %in%  toupper(missing_genes$symbol[name1])]
+  paste0(unique(temp5), collapse = ", ")
+}
+temp4$reference_symbols[grepl(pattern = "^$", x = temp4$reference_symbols)] <- NA
+length(grep(pattern = ",", x = temp4$reference_symbols))
+temp4 <- temp4[!is.na(temp4$reference_symbols),]
+nrow(temp4) 
+
+# Clean up
+stopCluster(cl)
+
+# for found reference symbols, add to final ortholog dataset
+temp2 <- NULL
+if(nrow(temp4) > 0){
+  temp2 <- data.frame("ortho_number" = "symbol_matching", "query" = temp4$related_accession, 
+             "reference" = NA, "reference_symbols" = NA, 
+             "query_nuc_accession" = temp4$product_accession, "query_gene_symbol" = temp4$symbol,
+             "official_reference_ortholog_1" = temp4$reference_symbols, 
+             "ortho_cat" = "symbol_matching", "GeneID" = temp4$GeneID)
+}
+ortholog_final <- rbind(ortholog_final, temp2)
+
+# check missing genes
+missing_genes <- query_feature_table[!(query_feature_table$symbol %in% ortholog_final$query_gene_symbol),]
+nrow(missing_genes) 
+```
+
+# **Create final ortholog list**
+```{r add the gene description}
+# add gene description
+ortholog_final$name <- query_feature_table$name[match(toupper(ortholog_final$query_gene_symbol), toupper(query_feature_table$symbol))]
+
+# Find indices where GeneID is NA
+na_indices <- is.na(ortholog_final$GeneID)
+
+# Perform the match only on those rows
+ortholog_final$GeneID[na_indices] <- query_feature_table$GeneID[
+  match(
+    toupper(ortholog_final$query_gene_symbol[na_indices]),
+    toupper(query_feature_table$symbol)
+  )
+]
+```
+
+# **Check which genes are coding versus non-coding**
+```{r add info on class of gene}
+# import query feature table and keep only those listed as genes
+feature_table_1 <- read.csv(file = config_links$query_feature_table_link, 
+                            header = T, sep = "\t", stringsAsFactors = F)
+feature_table_1 <- feature_table_1[feature_table_1$X..feature %in% "gene",]
+
+# annotate the class of the genes for the DLTs of interest
+ortholog_final <- ortholog_final %>%
+  mutate(query_gene_symbol_upper = toupper(query_gene_symbol)) %>%
+  left_join(
+    feature_table_1 %>%
+      group_by(symbol_upper = toupper(symbol)) %>%
+      summarise(class = paste(unique(class), collapse = ","), .groups = "drop"),
+    by = c("query_gene_symbol_upper" = "symbol_upper")
+  ) %>%
+  select(-query_gene_symbol_upper)
+```
+
+# **Write final ortholog dataset to file**
+```{r}
+write.csv(x = ortholog_final, file = file.path(here, "01_iteration", "output", "query_reference_ortholog_final.csv"))
+write.csv(x = missing_genes, file = file.path(here, "01_iteration", "output", "missing_genes.csv"))
+```
+
+# **combine all multiple ortholog queries**
+```{r}
+ortholog_1 <- read.csv(file = file.path(here, "01_iteration", "output", "query_reference_ortholog_final.csv"), 
+                       stringsAsFactors = F, header = T, row.names = 1)
+ortholog_2 <- read.csv(file = file.path(here, "02_iteration", "output", "query_reference_ortholog_final.csv"), 
+                       stringsAsFactors = F, header = T, row.names = 1)
+ortholog_3 <- read.csv(file = file.path(here, "03_iteration", "output", "query_reference_ortholog_final.csv"), 
+                       stringsAsFactors = F, header = T, row.names = 1)
+ortholog_4 <- read.csv(file = file.path(here, "04_iteration", "output", "query_reference_ortholog_final.csv"), 
+                       stringsAsFactors = F, header = T, row.names = 1)
+
+final_orthologs <- ortholog_1
+final_orthologs <- rbind(final_orthologs[!(final_orthologs$query_gene_symbol %in% ortholog_2$query_gene_symbol),], ortholog_2)
+final_orthologs <- rbind(final_orthologs[!(final_orthologs$query_gene_symbol %in% ortholog_3$query_gene_symbol),], ortholog_3)
+final_orthologs <- rbind(final_orthologs[!(final_orthologs$query_gene_symbol %in% ortholog_4$query_gene_symbol),], ortholog_4)
+final_orthologs$query_nuc_accession[grepl(pattern = "^$", x = final_orthologs$query_nuc_accession)] <- NA
+
+# Keep only those query_gene_symbols with exactly one unique reference_symbol
+temp8 <- final_orthologs %>%
+  group_by(query_gene_symbol) %>%
+  filter(n_distinct(official_reference_ortholog_1) == 1) %>%
+  dplyr::slice(1) %>%
+  ungroup()
+
+# Get the excluded query_gene_symbols (mapped to many different reference symbols)
+temp11 <- final_orthologs %>%
+  group_by(query_gene_symbol) %>%
+  filter(n_distinct(official_reference_ortholog_1) > 1) %>%
+  distinct(query_gene_symbol) %>%
+  pull(query_gene_symbol)
+nrow(temp11) # 0 same genes with different reference symbols
+
+# add gene description
+query_feature_table_filtered <- query_feature_table[!is.na(query_feature_table$name),]
+query_feature_table_filtered <- query_feature_table[!(grepl(pattern = "^$", x = query_feature_table$name)),]
+temp8$name <- query_feature_table_filtered$name[match(toupper(temp8$query_gene_symbol), toupper(query_feature_table_filtered$symbol))]
+
+# gene list of genes that were not annotated
+gene_interest1 <- gene_interest[!(gene_interest %in% temp8$query_gene_symbol)]
+
+# add missing genes back to ortholog final
+temp2 <- data.frame("ortho_number" = "missing_gene", "query" = NA, 
+             "reference" = NA, "reference_symbols" = NA, 
+             "query_nuc_accession" = NA, "query_gene_symbol" = gene_interest1,
+             "official_reference_ortholog_1" = NA, 
+             "ortho_cat" = "missing_gene", "GeneID" = NA)
+
+# add gene description
+temp2$name <- query_feature_table_filtered$name[match(toupper(temp2$query_gene_symbol), toupper(query_feature_table_filtered$symbol))]
+
+# Find indices where GeneID is NA
+na_indices <- is.na(temp2$GeneID)
+
+# add geneid
+temp2$GeneID[na_indices] <- query_feature_table_filtered$GeneID[
+  match(
+    toupper(temp2$query_gene_symbol[na_indices]),
+    toupper(query_feature_table_filtered$symbol)
+  )
+]
+
+# add product accession
+temp2$query_nuc_accession[na_indices] <- query_feature_table_filtered$product_accession[
+  match(
+    toupper(temp2$query_gene_symbol[na_indices]),
+    toupper(query_feature_table_filtered$symbol)
+  )
+]
+
+# add query id
+temp2$query[na_indices] <- query_feature_table_filtered$related_accession[
+  match(
+    toupper(temp2$query_gene_symbol[na_indices]),
+    toupper(query_feature_table_filtered$symbol)
+  )
+]
+
+
+# import query feature table and keep only those listed as genes
+feature_table_1 <- read.csv(file = config_links$query_feature_table_link, 
+                            header = T, sep = "\t", stringsAsFactors = F)
+feature_table_1 <- feature_table_1[feature_table_1$X..feature %in% "gene",]
+
+# annotate the class of the genes for the DLTs of interest
+temp2 <- temp2 %>%
+  mutate(query_gene_symbol_upper = toupper(query_gene_symbol)) %>%
+  left_join(
+    feature_table_1 %>%
+      group_by(symbol_upper = toupper(symbol)) %>%
+      summarise(class = paste(unique(class), collapse = ","), .groups = "drop"),
+    by = c("query_gene_symbol_upper" = "symbol_upper")
+  ) %>%
+  select(-query_gene_symbol_upper)
+
+final_orthologs <- rbind(temp8, temp2)
+nrow(final_orthologs) 
+sum(duplicated(final_orthologs$query_gene_symbol)) 
+
+write.csv(x = final_orthologs, file = file.path(here, "output", "final_orthologs_zebrafish.csv"))
+```
+
+# **add gene ortholog data to profile data**
+```{r}
+# load in different orthology dataset
+ortholog_zebrafish <- read.csv(file = file.path(here, "outout", "final_orthologs_zebrafish.csv"),
+                               header = T, row.names = 1)
+ortholog_human <- read.csv(file = file.path(here, "outout", "final_orthologs_human.csv"),
+                               header = T, row.names = 1)
+ortholog_brook <- read.csv(file = file.path(here, "outout", "final_orthologs_brook.csv"),
+                               header = T, row.names = 1)
+
+# add zebrafish orthologs
+profile_comparison$zebrafish <- ortholog_zebrafish$official_reference_ortholog_1[match(toupper(profile_comparison$gene_id),
+                                                                             toupper(ortholog_zebrafish$query_gene_symbol))]
+
+# add human orthologs
+profile_comparison$human <- ortholog_human$official_reference_ortholog_1[match(toupper(profile_comparison$gene_id),
+                                                                             toupper(ortholog_human$query_gene_symbol))]
+
+# add brook trout orthologs
+profile_comparison$brook <- ortholog_brook$reference_symbols[match(toupper(profile_comparison$gene_id),
+                                                                             toupper(ortholog_brook$query_gene_symbol))]
+
+# add trout gene description
+profile_comparison$trout_gene_desc <- ortholog_zebrafish$name[match(toupper(profile_comparison$gene_id),
+                                                                             toupper(ortholog_zebrafish$query_gene_symbol))]
+
+# add trout mRNA class
+profile_comparison$class <- ortholog_zebrafish$class[match(toupper(profile_comparison$gene_id),
+                                                                             toupper(ortholog_zebrafish$query_gene_symbol))]
+
+# Save final profile comparsion dataset with orthology added
+file_path <- file.path(here, "output", paste0("profile_comparison", ".qs2"))
+qs_save(profile_comparison_3, file = file_path,
+        compress_level = 3,
+        nthreads = parallel::detectCores() - 1)
+```

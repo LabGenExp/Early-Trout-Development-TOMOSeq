@@ -1,0 +1,212 @@
+---
+title: "Ligand-Receptor Daniotalk"
+author: "Ravindra Naraine"
+date: "March 03, 2025"
+subtitle: "Ligand-Receptor Daniotalk - parta"
+abstract: |
+  This notebook accompanies the analysis described in **RNA redistribution driven by alterations in transcription during early embryogenesis of rainbow trout**. It explores the potential ligand–receptor signaling between extreme vegetal and extreme animal poles across early developmental stages in *Oncorhynchus mykiss* (rainbow trout). The analysis uses spatial transcriptomics data (TOMO-seq) with orthology mapping and DESeq2-based comparisons (section A vs. E). The final ligand–receptor candidates are exported for use with Daniotalk pipeline. The notebook is the first part of two other scipts of the ligand–receptor interaction analysis.
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+# **Ligand-Receptor Daniotalk**
+```{r setup, include=TRUE, cache=TRUE}
+# location of working folder
+here <- "./06_ligand_receptors/"
+```
+
+# **Install and Load Required Libraries**
+```{r libraries, echo=FALSE, message=FALSE, warning=FALSE}
+# Set memory limit for Java and reproducibility seed
+options(java.parameters = "-Xmx30000m")
+set.seed(100)
+
+# List of required packages (from CRAN and Bioconductor)
+required_packages <- c("openxlsx", "DESeq2", "qs2", 
+                       "future", "future.apply", 
+                       "tidyverse", "rlang")
+
+# Apply the function to load required packages
+invisible(lapply(required_packages, function(x) {
+  suppressPackageStartupMessages(library(x, character.only = TRUE))
+}))
+```
+
+# **Load in objects and metadata**
+```{r load objects}
+# Define the file path where your saved list is stored
+file_path <- file.path(here, "../02_deseq_analysis", "output")
+
+# Load DESeq2 object
+ddsTC <- qs2::qs_read(paste0(file_path, "ddsTC.qs2"),
+                      validate_checksum = TRUE,
+                      nthreads = parallel::detectCores()-1)
+
+# Load variance stabilized transformation object
+rld <-  qs2::qs_read(paste0(file_path, "rld.qs2"),
+                     validate_checksum = TRUE,
+                     nthreads = parallel::detectCores()-1)
+
+# load sample metadata
+samplesDESeq <- qs2::qs_read(paste0(file_path, "samplesDESeq.qs2"), 
+                             validate_checksum = TRUE,
+                             nthreads = parallel::detectCores()-1)
+
+# load annotated DLT report table
+file_path <- file.path(here, "../05_orthology", "output")
+profile_comparison <- qs2::qs_read(paste0(file_path, "profile_comparison.qs2"), 
+                                   validate_checksum = TRUE,
+                                   nthreads = parallel::detectCores()-1)
+```
+
+# **Define objects**
+```{r define objects}
+# store fold change for each stage
+ligand_receptor <- list()
+```
+
+# **Prepare DLTs dataframe for ligand receptors analysis**
+```{r}
+# For each developmental stage, this loop:
+# - Identifies annotated DLTs with spatial expression profiles
+# - Separates genes expressed in vegetal vs. animal regions
+# - Aggregates counts by ortholog (zebrafish_human)
+# - Runs DESeq2 to compare section A vs. E
+# - Computes fold change for vegetal and animal genes
+# - Saves results per stage to Excel files
+
+stages <- c("3_dpf", "1_dpf", "1_hpf", "0_hpf")
+
+for(stage_name in stages){
+  # construct the dynamic column name
+  profile_column <- rlang::sym(paste0("course_profile_", stage_name))
+  message("Now processing: ", rlang::as_string(profile_column))
+  
+  # extract genes with annotations and stage-specific expression profiles
+  annotated_genes <- profile_comparison %>%
+    filter(!is.na(!!profile_column) & !is.na(zebrafish_human))
+  
+  # subset genes by expression region
+  vegetal_genes <- annotated_genes %>% filter(!!profile_column == "vegetal")
+  animal_genes  <- annotated_genes %>% filter(!!profile_column == "animal")
+  
+  # extract raw count matrix
+  count_matrix <- counts(ddsTC[[stage_name]], normalized = FALSE) %>%
+    as.data.frame() %>%
+    rownames_to_column(var = "gene_id") %>%
+    left_join(profile_comparison[, c("gene_id", "zebrafish_human")], by = "gene_id") %>%
+    filter(!is.na(zebrafish_human)) %>%
+    group_by(zebrafish_human) %>%
+    summarise(across(where(is.numeric), ~ round(sum(.))), .groups = "drop") %>%
+    column_to_rownames("zebrafish_human")
+  
+  # run DESeq2 for section A vs E
+  deseq_dataset <- DESeqDataSetFromMatrix(
+    countData = count_matrix,
+    colData = samplesDESeq[[stage_name]],
+    design = ~Replicate + Position
+  )
+  deseq_result <- DESeq(deseq_dataset, test = "Wald")
+  deseq_stats  <- data.frame(results(deseq_result, alpha = 0.01, name = "Position_E_vs_A"))
+  
+  # define helper to build result tables
+  build_expression_table <- function(cell_type, gene_list, result_df) {
+    df <- data.frame("Cell.type" = cell_type, "Gene" = gene_list)
+    df$FC <- result_df$log2FoldChange[match(df$Gene, rownames(result_df))]
+    df$P.value <- result_df$padj[match(df$Gene, rownames(result_df))]
+    df <- df[!is.na(df$P.value), ]
+    
+    if (tolower(cell_type) == "animal") {
+      df$FC <- -df$FC
+    }
+    
+    df$rank <- -log10(df$P.value) * sign(log10(2^(df$FC)))
+    df
+  }
+  
+  # generate ranked DEG tables
+  deg_vegetal <- build_expression_table("vegetal", unique(vegetal_genes$zebrafish_human), deseq_stats)
+  deg_animal  <- build_expression_table("animal",  unique(animal_genes$zebrafish_human),  deseq_stats)
+  
+  # report shared genes
+  shared_genes <- intersect(deg_vegetal$Gene, deg_animal$Gene)
+  message("Shared genes: ", length(shared_genes))
+  
+  # combine and save
+  ranked_ligands <- bind_rows(deg_vegetal, deg_animal)
+  ligand_receptor[[stage_name]] <- ranked_ligands
+  
+  output_dir <- file.path(here, "output", "stages_sections", stage_name)
+  dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+  openxlsx::write.xlsx(
+    x = ranked_ligands[, c("Cell.type", "Gene", "FC", "P.value")],
+    file = file.path(output_dir, "Data Sheet.xlsx"),
+    rowNames = FALSE
+  )
+}
+```
+
+# **get ligand-receptor for zebrafish Daniotalk**
+```{bash Daniotalk}
+# install daniotalk docker (28th August 2024)
+# image location: https://hub.docker.com/repository/docker/mlchodkowski/daniotalk
+docker pull mlchodkowski/daniotalk:latest
+
+# run docker
+# remove any running docker
+sudo docker stop daniotalk
+sudo docker rm daniotalk
+sudo docker run -itd \
+--name daniotalk \
+--entrypoint=/bin/bash \
+mlchodkowski/daniotalk:latest
+sudo docker exec -it daniotalk bash
+
+# build ligand-recpetor data
+python create_pairs.py
+
+# copy output files needed
+exit
+sudo docker cp daniotalk:/daniotalk/Database/Database.csv ./docker_files/
+sudo docker cp daniotalk:/daniotalk/Data/aliases.txt ./docker_files/
+sudo docker cp daniotalk:/daniotalk/Data/human_orthos.txt ./docker_files/
+sudo docker cp daniotalk:/daniotalk/Assets/'Plasma ligands_expt.xlsx' ./docker_files/
+sudo docker cp daniotalk:/daniotalk/Assets/'Plasma ligands_predicted.xlsx' ./docker_files/
+
+# remove running container
+sudo docker stop daniotalk
+sudo docker rm daniotalk
+```
+
+# **Cleanup and save object**
+```{r save individual objects}
+# Set up parallel plan
+plan(multicore)  # Efficient fork-based parallelism on Linux
+
+# List of object names to save
+object_names <- c("ligand_receptor")
+
+# Parallel saving loop
+future_lapply(object_names, function(name1) {
+  # Construct full file path with .qs2 extension
+  file_path <- file.path(here, "output", paste0(name1, ".qs2"))
+  
+  # Save the object by name using qs with multithreading
+  qs2::qs_save(get(name1), file = file_path,
+               compress_level = 3,
+               nthreads = parallel::detectCores() - 1)
+})
+
+# Reset plan to sequential after completion
+plan(sequential)
+```
+```{r load a particular object only}
+# Define the file path where your saved list is stored
+file_path <- file.path(here, "output", "ligand_receptor.qs2")
+
+# Load the entire list of objects
+ligand_receptor <- qs2::qs_read(file_path, 
+                                validate_checksum = TRUE,
+                                nthreads = parallel::detectCores()-1)
+```

@@ -1,0 +1,493 @@
+---
+title: "DESeq analysis"
+author: "Ravindra Naraine"
+date: "July, 15 2025"
+subtitle: "Differential expression analysis using DESeq2"
+abstract: |
+  This notebook continues the analysis described in **RNA redistribution driven by alterations in transcription during early embryogenesis of rainbow trout** and focuses on the identification of differentially localized transcripts (DLTs) in *Oncorhynchus mykiss* (rainbow trout), a hybrid of *O. mykiss* and *Salvelinus fontinalis* (brook trout), and *Danio rerio* (zebrafish) embryos using DESeq2. The code focuses primarily on the analysis for the *O. mykiss*. It covers preprocessing of raw count data, metadata curation, filtering of low-expression genes, and detection of significant DLTs across developmental stages and spatial sections. Both sectional (within-stage) and temporal (across-stage) patterns are assessed using likelihood ratio tests (LRT) and Wald tests.
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+# **DESeq analysis**
+```{r setup, include=TRUE, cache=TRUE}
+# location of working folder
+here <- "./02_deseq_analysis/"
+```
+
+# **Install and Load Required Libraries**
+```{r libraries}
+# Set memory limit for Java and reproducibility seed
+options(java.parameters = "-Xmx30000m")
+set.seed(100)
+
+# List of required packages (from CRAN and Bioconductor)
+required_packages <- c("dplyr", "DESeq2", 
+                       "qs2", "here", 
+                       "future", "future.apply",
+                       "parallel")
+
+# Apply the function to load required packages
+invisible(lapply(required_packages, function(x) {
+  suppressPackageStartupMessages(library(x, character.only = TRUE))
+}))
+```
+
+# **Define objects**
+```{r define objects}
+# List for experimental design metadata
+samplesDESeq <- list()
+
+# List for DESeq2 sample objects
+cds <- list()
+
+# List for DESeq2 analysis objects
+ddsTC <- list()
+
+# List for regularized vst-transformed normalized counts
+rld <- list()
+
+# List to store results for all comparisons
+results_comparison <- list()
+
+# List to store differential localized transcripts (DLTs)
+diff_genes <- list()
+```
+
+# **Create sample annotation file**
+```{r sample metadata}
+# Read in metadata file
+original_sample_data <- read.csv(
+  file = file.path(here, "../01_fastq_preprocessing", 
+                   "data", "01_samples_metadata.csv"),
+  header = TRUE,
+  sep = ",",
+  stringsAsFactors = TRUE
+)
+
+# Reorder and factorize columns
+original_sample_data <- original_sample_data %>%
+  # Factorize and set levels for key columns
+  mutate(
+    Stage = factor(Stage, levels = c("0_hpf", "1_hpf", "1_dpf", "3_dpf")), # change to 1 hpf, 2 hpf, 3 hpf for zebrafish TOMO-Seq
+    Position = factor(Position, levels = c("A", "B", "C", "D", "E")), # Use only levels "A" and "B" for trout-hybrid TOMO-Seq
+    library_name = factor(library_name),
+    SampleName = factor(SampleName)
+  ) %>%
+  # Preserve the original SampleName and compute sample_id from it,
+  # then create the new SampleName and set its factor levels
+  # sample_id represents a unique id for each egg or embryo used
+  mutate(
+    SampleName_old = SampleName,
+    sample_id      = factor(gsub(pattern = "_[A-E]", replacement = "", x = SampleName_old)),
+    SampleName     = paste0("trout_", Stage, "_", Position, "_", Replicate),
+    SampleName     = factor(SampleName, levels = unique(SampleName))
+  )
+
+# Set row names of the meatdata to SampleName
+rownames(original_sample_data) <- original_sample_data$SampleName
+
+# Assign the processed metadata to list
+samplesDESeq[["sample_all"]] <- original_sample_data
+```
+```{r remove outliers - note: sepecific for each TOMOSeq}
+# for use with Trout TOMOSeq data only
+# 1_hpf outliers: trout_1_hpf_A_2 to trout_1_hpf_E_2 complete samples (replicate 2)
+samplesDESeq[["sample_all"]] <- samplesDESeq[["sample_all"]] %>%
+  filter(sample_id != "T2H1_2") %>%  # Remove outlier sample
+  mutate(across(c(library_name, SampleName, Stage, sample_id, Position), droplevels))
+
+# for use with Trout-hybrid TOMOSeq data only
+# 0_hpf outliers: trout_0_hpf_A_3 and trout_0_hpf_B_3 samples
+# 3_dpf outliers: trout_3_dpf_A_3 and trout_3_dpf_B_3 samples
+samplesDESeq[["sample_all"]] <- samplesDESeq[["sample_all"]] %>%
+  filter(sample_id != "13",
+         sample_id != "43") %>%  # Remove outlier sample
+  mutate(across(c(library_name, SampleName, Stage, sample_id, Position), droplevels))
+
+# for use with Zebrafish TOMOSeq data only
+# 2_hpf outliers: complete replicate 3
+samplesDESeq[["sample_all"]] <- samplesDESeq[["sample_all"]] %>%
+  filter(!((Stage == "2_hpf") &
+         (Replicate == 3))) %>%  # Remove outlier sample
+  mutate(across(c(library_name, SampleName, Stage, sample_id, Position), droplevels))
+```
+
+# **Import count data**
+```{r import count data}
+# Read HTSeq counts file
+data <- read.csv(
+  file = file.path(here, "../01_fastq_preprocessing", "output", 
+                   "05_count", "htcounts", "htcounts_merged_counts.csv"),
+  stringsAsFactors = FALSE,
+  row.names = 1
+)
+
+# Clean column names: replace periods with dashes
+colnames(data) <- gsub("\\.", "-", colnames(data))
+cat("Initial dimensions:", nrow(data), "rows and", ncol(data), "columns\n")
+
+# Filter out unwanted rows based on patterns in row names
+unwanted_patterns <- "no_feature|ambiguous|too_low_a|not_aligned|alignment_not"
+data <- data[!grepl(unwanted_patterns, rownames(data)), ]
+cat("After filtering unwanted rows:", nrow(data), "rows remain\n")
+
+# Subset columns to match library names in samplesDESeq metadata
+valid_columns <- toupper(colnames(data)) %in% toupper(samplesDESeq[["sample_all"]]$library_name)
+data <- data[, valid_columns]
+cat("After subsetting columns:", ncol(data), "columns remain\n")
+
+# Keep genes that have counts > 30 in at least one sample
+data <- data[rowSums(data > 30) > 0, ]
+cat("After filtering low count genes:", nrow(data), "rows remain\n")
+
+# Update column names to match SampleName from samplesDESeq metadata
+matching_indices <- match(toupper(colnames(data)), toupper(samplesDESeq[["sample_all"]]$library_name))
+colnames(data) <- samplesDESeq[["sample_all"]]$SampleName[matching_indices]
+```
+
+# **DESeq2 analysis - Used only for Trout and Zebrafish TOMOSeq**
+```{r deseq processing functions}
+#' Process DESeq2 analysis for a specific developmental stage or all stages.
+#'
+#' This function subsets samples and counts for a specific stage (if provided),
+#' constructs a DESeq2 dataset, and runs the likelihood ratio test (LRT).
+#' It returns updated sample metadata, DESeq2 count datasets, and DESeq2 results.
+#'
+#' @param name Character. Name for storing the processed subset in the lists (e.g., "0_hpf" or "full_profile_changes").
+#' @param samples List. Contains sample metadata; must include `samples[["sample_all"]]`.
+#' @param counts Matrix or data.frame. Full gene-level count matrix (rows = genes, columns = samples).
+#' @param cds_list List. A list to store constructed DESeqDataSet objects.
+#' @param ddsTC_list List. A list to store processed DESeq results (DESeqDataSet after running DESeq).
+#' @param design Formula. DESeq2 design formula (e.g., ~Replicate + Position).
+#' @param reduced Formula. Reduced model formula for LRT (e.g., ~Replicate).
+#' @param filter_stage Character or NULL. If provided, only samples from this Stage are analyzed.
+#'
+#' @return A list with updated:
+#'   \item{samples}{Updated samples list with stage-specific metadata.}
+#'   \item{cds_list}{Updated list containing DESeqDataSet objects.}
+#'   \item{ddsTC_list}{Updated list containing DESeq results after running DESeq().}
+#'
+#' @examples
+#' result <- process_deseq(
+#'   name = "0_hpf",
+#'   samples = samplesDESeq,
+#'   counts = data,
+#'   cds_list = cds,
+#'   ddsTC_list = ddsTC,
+#'   design = ~Replicate + Position,
+#'   reduced = ~Replicate,
+#'   filter_stage = "0_hpf"
+#' )
+process_deseq <- function(name,
+                          samples,
+                          counts,
+                          cds_list,
+                          ddsTC_list,
+                          design,
+                          reduced,
+                          filter_stage = NULL) {
+
+  # 1) Subset samples (all or stage-specific)
+  filtered_samples <- samples[["sample_all"]]
+  if (!is.null(filter_stage)) {
+    filtered_samples <- dplyr::filter(filtered_samples, Stage == filter_stage)
+  }
+
+  # 2) Clean unused factor levels
+  filtered_samples <- dplyr::mutate(
+    filtered_samples,
+    across(c(library_name, SampleName, Stage, Position), droplevels)
+  )
+
+  # 3) Update samples list with this subset
+  samples[[name]] <- filtered_samples
+
+  # 4) Subset the count matrix to only include these samples
+  filtered_counts <- counts[, colnames(counts) %in% filtered_samples$SampleName, drop = FALSE]
+
+  # 5) Build DESeqDataSet and run DESeq (LRT)
+  cds_list[[name]] <- DESeqDataSetFromMatrix(
+    countData = filtered_counts,
+    colData = filtered_samples,
+    design = design
+  )
+  ddsTC_list[[name]] <- DESeq(
+    object = cds_list[[name]],
+    test = "LRT",
+    reduced = reduced
+  )
+
+  # 6) Return updated lists
+  list(samples = samples, cds_list = cds_list, ddsTC_list = ddsTC_list)
+}
+
+#' Aggregate counts across replicates and run DESeq2 analysis for stage-level comparisons.
+#'
+#' This function aggregates the counts across the sections of the same replicate into stage-level counts
+#' (aggregating by `sample_id`), updates the corresponding metadata,
+#' and runs DESeq2 using the Likelihood Ratio Test (LRT).
+#'
+#' @param samples List. Full sample metadata, must include `samples[["full_profile_changes"]]`.
+#' @param ddsTC_list List. A list to store DESeq2 objects; must include 
+#'   `ddsTC_list[["full_profile_changes"]]` for normalized counts.
+#' @param cds_list List. A list to store new DESeqDataSet objects.
+#'
+#' @return A list with updated:
+#'   \item{samples}{Updated sample metadata with stage-level aggregation.}
+#'   \item{cds_list}{Updated list containing DESeqDataSet for aggregated stage data.}
+#'   \item{ddsTC_list}{Updated list containing DESeq results for aggregated stage data.}
+#'
+#' @examples
+#' result <- process_stage_counts(samples = samplesDESeq,
+#'                                ddsTC_list = ddsTC,
+#'                                cds_list = cds)
+#'
+#' samplesDESeq <- result$samples
+#' cds <- result$cds_list
+#' ddsTC <- result$ddsTC_list
+process_stage_counts <- function(samples,
+                                 ddsTC_list,
+                                 cds_list) {
+  # 1) Copy full profile metadata for "stages"
+  samples[["stages"]] <- samples[["full_profile_changes"]]
+  
+  # 2) Extract normalized counts and round to integers
+  norm_counts <- counts(ddsTC_list[["full_profile_changes"]], normalized = TRUE)
+  norm_counts <- round(norm_counts)
+  
+  # 3) Ensure metadata order matches count matrix columns
+  meta <- samples[["stages"]]
+  meta <- meta[match(colnames(norm_counts), meta$SampleName), ]
+  
+  # 4) Aggregate counts across replicates (by sample_id)
+  aggregated_counts <- t(rowsum(t(norm_counts), group = meta$sample_id))
+  
+  # 5) Create aggregated metadata (first occurrence of each unique sample_id)
+  agg_meta <- meta[!duplicated(meta$sample_id), ]
+  agg_meta$sample_id <- as.factor(agg_meta$sample_id)
+  
+  # 6) Update aggregated_counts column names to match SampleName
+  new_names <- agg_meta$SampleName[
+    match(toupper(colnames(aggregated_counts)), toupper(agg_meta$sample_id))
+  ]
+  colnames(aggregated_counts) <- new_names
+  
+  # 7) Drop unused factor levels & ensure same order as count matrix
+  agg_meta <- agg_meta %>%
+    mutate(across(c(library_name, SampleName, Stage, sample_id), droplevels))
+  agg_meta <- agg_meta[match(colnames(aggregated_counts), agg_meta$SampleName), ]
+  
+  # 8) Create DESeqDataSet & run DESeq (LRT)
+  cds_list[["stages"]] <- DESeqDataSetFromMatrix(
+    countData = aggregated_counts,
+    colData = agg_meta,
+    design = ~Stage
+  )
+  ddsTC_list[["stages"]] <- DESeq(
+    object = cds_list[["stages"]],
+    test = "LRT",
+    reduced = ~1
+  )
+  
+  # 9) Update metadata in samples
+  samples[["stages"]] <- agg_meta
+  
+  # 10) Return updated lists
+  list(samples = samples, cds_list = cds_list, ddsTC_list = ddsTC_list)
+}
+```
+```{r DLTs wihin individual stages}
+# Define stages to process
+stages <- c("0_hpf", "1_hpf", "1_dpf", "3_dpf")
+
+lapply(stages, function(stages) {
+  result <- process_deseq(
+    name = stages,                    # output name
+    samples = samplesDESeq,           # metadata
+    counts = data,                    # count data
+    cds_list = cds,                   # list to add DESeqDataSet object
+    ddsTC_list = ddsTC,               # list to add DESeqDataSet object
+    design = ~Replicate + Position,   # design of DESeq model
+    reduced = ~Replicate,             # reduced model used
+    filter_stage = stages             # which dataset to analyse
+  )
+  
+  # Update global variables
+  samplesDESeq <<- result$samples
+  cds <<- result$cds_list
+  ddsTC <<- result$ddsTC_list
+})
+```
+```{r DLTs changing across section and stages}
+# Process full profile changes
+result <- process_deseq(
+  name = "full_profile_changes",                  # output name
+  samples = samplesDESeq,                         # metadata
+  counts = data,                                  # count data
+  cds_list = cds,                                 # list to add DESeqDataSet object
+  ddsTC_list = ddsTC,                             # list to add DESeqDataSet object
+  design = ~Stage + Position + Stage:Position,    # design of DESeq model
+  reduced = ~Stage + Position,                    # reduced model used
+  filter_stage = NULL                             # no filter used. Use all datasets.
+)
+
+samplesDESeq <- result$samples
+cds <- result$cds_list
+ddsTC <- result$ddsTC_list
+
+# Process any profile changes (profile changes or magnitude changes)
+result <- process_deseq(
+  name = "any_profile_changes",                   # output name
+  samples = samplesDESeq,                         # metadata
+  counts = data,                                  # count data
+  cds_list = cds,                                 # list to add DESeqDataSet object
+  ddsTC_list = ddsTC,                             # list to add DESeqDataSet object
+  design = ~Stage + Position,                     # design of DESeq model
+  reduced = ~Stage,                               # reduced model used
+  filter_stage = NULL                             # no filter used. Use all datasets.
+)
+
+samplesDESeq <- result$samples
+cds <- result$cds_list
+ddsTC <- result$ddsTC_list
+```
+```{r DLTs changing in total transcript across stages}
+# look for changes between total transcript count per stage
+result <- process_stage_counts(samples = samplesDESeq, 
+                               ddsTC_list = ddsTC, 
+                               cds_list = cds)
+
+samplesDESeq <- result$samples
+cds <- result$cds_list
+ddsTC <- result$ddsTC_list
+```
+```{r process for stage changes pairwise}
+# Pairwise difference between stages
+ddsTC[["stages_pairwise"]] <- DESeq(object = cds[["stages"]], test = "Wald")
+```
+
+# **DESeq2 analysis - Used only for Trout-hybrid TOMOSeq**
+```{r process for same section across stages}
+for(name1 in c("A", "B")){
+  # Start with the full set of samples
+  filtered_samples <- samplesDESeq[["sample_all"]]
+  
+  filtered_samples <- filtered_samples[filtered_samples$Position %in% name1,]
+  
+  # Remove unused factor levels for specified columns
+  filtered_samples <- dplyr::mutate(
+    filtered_samples,
+    across(c(library_name, SampleName, sample_id, 
+             Stage, Position), 
+           droplevels)
+  )
+  
+  samplesDESeq[[paste0("Stage_", name1)]] <- filtered_samples
+  
+  # Subset counts based on the SampleName values in filtered samples
+  filtered_counts <- data[, colnames(data) %in% filtered_samples$SampleName, drop = FALSE]
+  
+  # Create the DESeqDataSet using the filtered counts and sample information
+  cds[[paste0("Stage_", name1)]] <- DESeqDataSetFromMatrix(
+    countData = filtered_counts,
+    colData = filtered_samples,
+    design = ~Replicate + Stage
+  )
+  
+  # Run pairwise DESeq analysis
+  ddsTC[[paste0("Stage_", name1)]] <- DESeq(
+    object = cds[[paste0("Stage_", name1)]],
+    test = "Wald"
+  )
+}
+```
+
+# **DESeq2 count transformation**
+```{r count transformation}
+# vst transformation - blinded
+rld[["blind"]]   <- lapply(ddsTC, vst, blind = TRUE)
+
+# vst transformation - not blinded
+rld[["noblind"]] <- lapply(ddsTC, vst, blind = FALSE)
+```
+
+# **Extraction of data comparison and sig values**
+```{r extract DLTs for LRT}
+# 1. Extract results from DESeq2 objects, skipping the 8th element
+results_comparison <- lapply(ddsTC[!(names(ddsTC) %in% "stages_pairwise")], function(dds) results(dds, alpha = 0.01))
+names(results_comparison) <- names(ddsTC)[!(names(ddsTC) %in% "stages_pairwise")]
+
+# 2. Extract DLTs by filtering for adjusted p-values below 0.01
+diff_genes <- lapply(results_comparison, function(res) {
+  rownames(res)[which(res$padj < 0.01)]
+})
+```
+```{r extract DLTs for pairwise stage}
+# Define key and comparisons for pairwise stage analyses
+pairwise_key <- "stages_pairwise"
+comparisons <- resultsNames(ddsTC[[pairwise_key]])
+comparisons <- comparisons[!grepl("Intercept", comparisons)]
+
+# 1. Extract DESeq2 results for each pairwise comparison and store as data frames
+results_comparison[[pairwise_key]] <- setNames(
+  lapply(comparisons, function(comp) {
+    data.frame(results(object = ddsTC[[pairwise_key]], alpha = 0.01, name = comp))
+  }),
+  comparisons
+)
+
+# 2. Extract DEGs: For each comparison, select rows where adjusted padj < 0.01
+diff_genes[[pairwise_key]] <- lapply(results_comparison[[pairwise_key]], function(df) {
+  df[which(df$padj < 0.01), ]
+})
+
+# 3. Annotate DEGs based on log2FoldChange from results_comparison[["stages_pairwise"]]
+# Other fold thresholds and filtering is added in later steps and/or overlapped with results from LRT results
+for (comp in names(results_comparison[[pairwise_key]])) {
+  # Determine status: "denovo" if log2FC > 0, "degrade" if log2FC < 0
+  logfc <- diff_genes[[pairwise_key]][[comp]]$log2FoldChange
+  diff_genes[[pairwise_key]][[comp]]$status <- ifelse(logfc > 0, "denovo",
+                                                      ifelse(logfc < 0, "degrade", NA))
+}
+```
+
+# **Cleanup and save object**
+```{r save individual objects}
+# Set up parallel plan
+plan(multicore)  # Efficient fork-based parallelism on Linux
+
+# List of object names to save
+object_names <- c("original_sample_data",
+                  "samplesDESeq",
+                  "data",
+                  "cds",
+                  "ddsTC", 
+                  "rld",
+                  "results_comparison", 
+                  "diff_genes")
+
+# Parallel saving loop
+future_lapply(object_names, function(name1) {
+  # Construct full file path with .qs2 extension
+  file_path <- file.path(here, "output", paste0(name1, ".qs2"))
+  
+  # Save the object by name using qs with multithreading
+  qs2::qs_save(get(name1), file = file_path,
+            compress_level = 3,
+            nthreads = parallel::detectCores() - 1)
+})
+
+# Reset plan to sequential after completion
+plan(sequential)
+```
+```{r load a particular object only}
+# Define the file path where your saved list is stored
+file_path <- file.path(here, "output", "ddsTC.qs2")
+
+# Load the entire list of objects
+ddsTC <- qs2::qs_read(file_path, 
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+```

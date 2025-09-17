@@ -1,0 +1,488 @@
+---
+title: "Clustering of TOMO-Seq in developing embryos"
+author: "Ravindra Naraine"
+date: "March 03, 2025"
+subtitle: "Based on DESeq2 and TrendCatcher filtering"
+abstract: |
+  This notebook is designed to accompany the analysis described in **RNA redistribution driven by alterations in transcription during early embryogenesis of rainbow trout**. It presents a clustering analysis of spatially resolved RNA-seq data from *Oncorhynchus mykiss* (rainbow trout) embryos. It focuses on transcripts with significant spatial expression changes identified by DESeq2 and TrendCatcher. Clustering was performed using the degPatterns function from the DEGreport package to define spatial expression profiles across embryo sections and developmental stages. 
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+# **Clustering analysis**
+```{r setup, include=TRUE, cache=TRUE}
+# location of working folder
+here <- "./04_clustering/"
+```
+
+# **Install and Load Required Libraries**
+```{r libraries, echo=FALSE, message=FALSE, warning=FALSE}
+# Set memory limit for Java and reproducibility seed
+options(java.parameters = "-Xmx30000m")
+set.seed(100)
+
+# List of required packages (from CRAN and Bioconductor)
+required_packages <- c("dplyr", "ggplot2", 
+                       "future", "future.apply",
+                       "DESeq2", "DEGreport", 
+                       "qs2", "parallel", "tibble",
+                       "tidyr")
+
+# Apply the function to load required packages
+invisible(lapply(required_packages, function(x) {
+  suppressPackageStartupMessages(library(x, character.only = TRUE))
+}))
+```
+
+# **Custom functions**
+```{r custom functions}
+#' Clean gene names from DEGreport clustering output
+#'
+#' This function standardizes gene names by reversing formatting changes introduced during DEGreport clustering,
+#' restoring original gene symbols by replacing or fixing common patterns (e.g., `.i.1` to `-i-1`, `si.` to `si:`).
+#'
+#' @param degpattern_normalized_dataset Data frame. DEGreport-normalized gene expression data that includes a `genes` column.
+#'
+#' @return A data frame with corrected gene identifiers.
+#' @export
+cleanup_degpattern_names <- function(degpattern_normalized_dataset){
+  degpattern_normalized_dataset$genes <- gsub(pattern = "\\.i\\.1$", replacement = "-i-1", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "^si\\.", replacement = "si:", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "^zgc\\.", replacement = "zgc:", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "ch1073\\.", replacement = "ch1073-", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "ch211\\.", replacement = "ch211-", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "ch73\\.", replacement = "ch73-", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "dkey\\.", replacement = "dkey-", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "rp71\\.", replacement = "rp71-", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "^zmp\\.", replacement = "zmp:", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "^foxp3\\.1$", replacement = "foxp3-1", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "dkeyp\\.", replacement = "dkeyp-", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "^wu\\.", replacement = "wu:", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "^apoa\\.i\\.2$", replacement = "apoa-i-2", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "^c\\.myc$", replacement = "c-myc", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "^cry\\.dash$", replacement = "cry-dash", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "^csf\\.3$", replacement = "csf-3", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "^im\\.7151449$", replacement = "im:7151449", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "^nramp\\.alpha$", replacement = "nramp-alpha", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "^sb\\.cb288$", replacement = "sb:cb288", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "^il\\.18$", replacement = "il-18", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "^p\\.ras$", replacement = "p-ras", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "^im\\.7138535$", replacement = "im:7138535", x = degpattern_normalized_dataset$genes)
+  degpattern_normalized_dataset$genes <- gsub(pattern = "^trnaa\\.ugc_150$", replacement = "trnaa-ugc_150", x = degpattern_normalized_dataset$genes)
+  
+  return(degpattern_normalized_dataset)
+}
+
+#' Cluster differentially localized transcripts (DLTs) across sections and stages
+#'
+#' This function performs clustering on a set of genes of interest using DEGreport's `degPatterns`, based on their expression
+#' across spatial sections (A–E) for a given or all developmental stage. Gene expression is derived from VST-transformed counts.
+#'
+#' @param deseq_dataset Character. Name of the DESeq2 dataset (must match entry in `rld$noblind` and `samplesDESeq`).
+#' @param degs_interest Character vector. Gene IDs to cluster.
+#' @param groupDifference Numeric. Fold change threshold used by `degPatterns` to identify meaningful expression differences.
+#' @param pattern Optional character. Specific DEG pattern to evaluate using DEGreport.
+#'
+#' @return A DEGreport `degPatterns` object with gene names cleaned up.
+#' @export
+deg_pattern_clustering_1 <- function(deseq_dataset, 
+                                     degs_interest,
+                                     groupDifference, pattern = NULL){
+  
+  # extract the DE genes
+  diff_genes_temp1 <- degs_interest
+  
+  # Extract the vst matrix from the object
+  rld_mat_temp1 <- assay(rld$noblind[[deseq_dataset]])
+  
+  # Use the vst values for the DLTs of interest
+  cluster_rlog_temp1 <- rld_mat_temp1[diff_genes_temp1, ]
+  
+  # metadata
+  temp1 <- samplesDESeq[[deseq_dataset]]
+  temp1$Position <- factor(temp1$Position, levels = c("A", "B", "C", "D", "E"))
+  temp1$replicate_position <- paste0(temp1$Stage, "_", temp1$Position)
+  temp1$replicate_position <- factor(temp1$replicate_position)
+  
+  # clustering, requiring fold change of interest between difference sections
+  temp22 <- degPatterns(ma = cluster_rlog_temp1, metadata = temp1, time="Position", col = "Stage",
+                        minc = 1, cutoff = 0.7, scale = FALSE,
+                        consensusCluster = FALSE, reduce = FALSE, 
+                        summarize = "replicate_position", groupDifference = groupDifference, pattern = pattern, plot = F)
+  
+  # cleanup the gene names
+  temp22$normalized <- cleanup_degpattern_names(degpattern_normalized_dataset = temp22$normalized)
+  
+  return(temp22)
+}
+
+#' Identify genes with consistent spatial expression changes across stages
+#'
+#' This function searches for genes that show a minimum fold change across multiple developmental stages, specifically
+#' within one or more defined spatial sections (A–E). It clusters each section separately and collects genes passing requirements.
+#'
+#' @param deseq_dataset Character. Name of the DESeq2 dataset to access VST expression matrix and metadata.
+#' @param degs_interest Character vector. Gene IDs to be tested for clustering.
+#' @param groupDifference Numeric. Minimum fold change between groups for inclusion in a cluster.
+#' @param position Character or vector. Section(s) (e.g. `"A"`, `"B"`, `"all"`) to test for changes across stages.
+#'
+#' @return A vector of unique gene IDs that meet the fold change criteria in at least one tested position.
+#' @export
+deg_pattern_position_clustering <- function(deseq_dataset, 
+                                            degs_interest,
+                                            groupDifference, 
+                                            position){
+  
+  # extract the DLTs of interest
+  diff_genes_temp1 <- degs_interest
+  
+  # Extract the vst matrix from the object
+  rld_mat_temp1 <- assay(rld$noblind[[deseq_dataset]])
+  
+  # Use the vst values for the DLTs of interst
+  cluster_rlog_temp1 <- rld_mat_temp1[diff_genes_temp1, ]
+  
+  # metadata
+  temp1 <- samplesDESeq[[deseq_dataset]]
+  temp1$position <- factor(temp1$Position, levels = c("A", "B", "C", "D", "E"))
+  temp1$replicate_position <- paste0(temp1$Stage, "_", temp1$Position)
+  temp1$replicate_position <- factor(temp1$replicate_position)
+  
+  temp4 <- NULL
+  temp4_200 <- if(position == "all"){unique(temp1$Position)}else{position}
+  for(name1 in temp4_200){
+    temp2 <- temp1[temp1$Position %in% name1,]
+    temp2$Position <- droplevels(temp2$Position)
+    temp2$replicate_position <- droplevels(temp2$replicate_position)
+    
+    temp3 <- cluster_rlog_temp1[, colnames(cluster_rlog_temp1) %in% temp2$SampleName]
+    
+    # Find genes with fold change of interst between same sections of different stages
+    temp22 <- degPatterns(ma = temp3, metadata = temp2, time="Position", col = "Stage",
+                          minc = 1, cutoff = 0.7, scale = FALSE,
+                          consensusCluster = FALSE, reduce = FALSE, 
+                          summarize = "replicate_position", groupDifference = groupDifference, plot = F)
+    
+    # cleanup the gene names
+    temp22$normalized <- cleanup_degpattern_names(degpattern_normalized_dataset = temp22$normalized)
+    
+    temp4 <- union(temp4, temp22$normalized$genes)
+  }
+  return(temp4)
+}
+```
+
+# **Define objects**
+```{r define objects}
+# dataset with DLTs and profiles
+profile_comparison <- data.frame()
+
+# averaged expression across replicates of normalized counts per stage
+mean_sd <- list()
+
+# clustering profiles
+deg_clusters <- list()
+```
+
+# **Load in DESeq2 objects and metadata**
+```{r load DESeq2 objects}
+# Define the file path where your saved list is stored
+file_path <- file.path(here, "../02_deseq_analysis", "output")
+
+# Load DESeq2 object
+ddsTC <- qs2::qs_read(paste0(file_path, "ddsTC.qs2"),
+                      validate_checksum = TRUE,
+                      nthreads = parallel::detectCores()-1)
+
+# Load variance stabilized transformation object
+rld <-  qs2::qs_read(paste0(file_path, "rld.qs2"),
+                     validate_checksum = TRUE,
+                     nthreads = parallel::detectCores()-1)
+
+# load sample metadata
+samplesDESeq <- qs2::qs_read(paste0(file_path, "samplesDESeq.qs2"), 
+                             validate_checksum = TRUE,
+                             nthreads = parallel::detectCores()-1)
+
+# load DLTs from DESeq2
+diff_genes <- qs2::qs_read(paste0(file_path, "diff_genes.qs2"), 
+                             validate_checksum = TRUE,
+                             nthreads = parallel::detectCores()-1)
+
+# filtered trendcatcher dataset (padj < 0.01 & 100 count difference between lowest and highest condition)
+file_path <- file.path(here, "../03_trendcatcher", "output")
+trendcatcher_data_filtered <- qs2::qs_read(paste0(file_path, "trendcatcher_data_filtered.qs2"), 
+                                           validate_checksum = TRUE,
+                                           nthreads = parallel::detectCores()-1)
+```
+
+# **Filter dataset for > 20 transcripts per stage**
+```{r filter dataset for > 20 transcripts per stage}
+# Extract normalized counts and sample metadata
+temp1 <- counts(ddsTC$stages, normalized = TRUE)
+temp2 <- samplesDESeq$stages
+
+# Create a data frame of average gene expression per stage
+profile_comparison <- as.data.frame(temp1) %>%
+  rownames_to_column("Gene") %>%
+  pivot_longer(-Gene, names_to = "SampleName", values_to = "expression") %>%
+  left_join(temp2 %>% dplyr::select(SampleName, Stage), by = "SampleName") %>%
+  group_by(Gene, Stage) %>%
+  dplyr::summarize(mean_expr = mean(expression), .groups = "drop") %>%
+  pivot_wider(names_from = Stage, values_from = mean_expr, names_prefix = "mean_") %>%
+  column_to_rownames("Gene")
+
+# Subset to genes that are in the union of the trendcatcher filtered gene list (DESeq2 and trendcatcher dlt intersect)
+profile_comparison <- profile_comparison[rownames(profile_comparison) %in% Reduce(union, lapply(trendcatcher_data_filtered, rownames)), ]
+
+# Filter genes: keep only those with at least one stage having > 20 normalized counts
+profile_comparison <- profile_comparison[apply(profile_comparison, 1, function(x) any(x > 20)), ]
+```
+
+# **Calculate arithmetic mean of normalized counts per stage**
+```{r calculate arithmetic mean of normalized counts per stage}
+# store the mean of the replicates
+temp5_1 <- list()
+for(name1 in c("full_profile_changes")){
+  for(name2 in unique(samplesDESeq$full_profile_changes$Stage)){
+    # extract normalized count data for the stages
+    temp1 <- counts(object = ddsTC[[name1]], normalized = TRUE)[,toupper((colData(ddsTC[[name1]]))[,"Stage"]) %in% toupper(name2)]
+    
+    # get all replicates for a given stage
+    temp1_1 <- data.frame(colData(ddsTC[[name1]]))[toupper(colData(ddsTC[[name1]])[,"Stage"]) %in% toupper(name2),]
+    
+    # for each replicate, calculate the relative expression
+    for(name3 in unique(temp1_1$sample_id)){
+      # grab the columns for those conditions
+      temp1_2 <- temp1_1$SampleName[temp1_1$sample_id %in% name3]
+      # Extract the normalized counts for that replicate
+      temp1_3 <- temp1[,colnames(temp1) %in% temp1_2]
+      colnames(temp1_3) <- temp1_1$Position[temp1_1$sample_id %in% name3][match(colnames(temp1_3), colnames(temp1_3))]
+      # find the relative proportion at a given position relative to all sections
+      temp4_1 <- data.frame(t(apply(X = temp1_3, 1, function(x) x/sum(x))))
+      temp4_1[apply(temp1_3, 1, function(x) all(x ==0)),] <- 0
+      temp5_1[[name2]][[name3]] <- temp4_1
+    }
+  }
+}
+
+# average the percentage expression across the replicates
+# store the averaged expression
+temp5_2 <- list()
+
+for(name1 in names(temp5_1)){
+  temp3 <- data.frame()
+  temp4 <- data.frame()
+  for(name2 in c("A", "B", "C", "D", "E")){
+    temp1 <- lapply(temp5_1[[name1]], function(x) x[,colnames(x) %in% name2])
+    temp2 <- t(do.call(rbind.data.frame, temp1))
+    rownames(temp2) <- rownames(temp5_1[[name1]][[1]])
+    temp2 <- data.frame(apply(temp2, 1, sum))
+    colnames(temp2) <- name2
+    if(nrow(temp3) == 0){
+      temp3 <- temp2
+    }else{
+      temp3 <- cbind(temp3, temp2)
+    }
+  }
+  temp4 <- data.frame(t(apply(temp3, 1, function(x) x/sum(x))))
+  temp4[apply(temp3, 1, function(x) all(x ==0)),] <- 0
+  temp5_2[[name1]] <- temp4
+}
+
+mean_sd[["mean_percentage"]] <- temp5_1
+mean_sd[["mean_percentage_avg"]] <- temp5_2
+```
+
+# **Add profile categories using rule-based classification**
+```{r add localization category clustering}
+# Formulae for profiles
+# extreme animal profile (1)  = (A > B & A > C & A > D & A > E) & (A + B > D + E) & (C > D | C > E)
+# animal profile (2)          = (B > A & B > C & B > D & B > E) & (D + E) < 0.4
+# vegetal profile (3)         = (D + E > A + B + C) & (D > A | D > B | D > C)
+# extreme vegetal profile (4) = (E > A & E > B & E > C & E > D) & (E > 0.5) & (E > 2 * D)
+# central profile (6)         = (C ≥ 0.30) & (A, B, D, E < 0.25)
+# other profile (5)           = "does not meet any of the above criteria"
+
+for (name2 in names(mean_sd$mean_percentage_avg)) {
+  temp2 <- mean_sd$mean_percentage_avg[[name2]]
+  
+  # Remove rows with any NA values
+  temp2 <- temp2[!apply(temp2, 1, function(x) any(is.na(x))), ]
+  
+  temp2$profile <- NA
+  
+  for (i in 1:nrow(temp2)) {
+    A <- temp2$A[i]
+    B <- temp2$B[i]
+    C <- temp2$C[i]
+    D <- temp2$D[i]
+    E <- temp2$E[i]
+    
+    if (A > B && A > C && A > D && A > E &&
+        (A + B) > (D + E) &&
+        (C > D || C > E)) {
+      temp2$profile[i] <- 1  # extreme animal
+    } else if (E > A && E > B && E > C && E > D &&
+               E > 0.5 && E > 2 * D) {
+      temp2$profile[i] <- 4  # extreme vegetal
+    } else if ((D + E) > (A + B + C) &&
+               (D > A || D > B || D > C)) {
+      temp2$profile[i] <- 3  # vegetal
+    } else if (C >= 0.3 &&
+               A < 0.25 && B < 0.25 && D < 0.25 && E < 0.25) {
+      temp2$profile[i] <- 6  # central
+    } else if (B > A && B > C && B > D && B > E &&
+               (D + E) < 0.4) {
+      temp2$profile[i] <- 2  # animal
+    } else {
+      temp2$profile[i] <- 5  # other
+    }
+  }
+  mean_sd[["profile"]][[name2]] <- temp2
+}
+```
+
+# **Add profile classification, proportion info to profile_comparison**
+```{r add profile classification}
+# add gene id
+profile_comparison$gene_id <- rownames(profile_comparison)
+# reorder the columns
+profile_comparison <- profile_comparison %>%
+  dplyr::select(gene_id, mean_0_hpf, mean_1_hpf, mean_1_dpf, mean_3_dpf)
+
+# add DESeq status to the trendcatcher filtered data
+profile_comparison$deseq_stage_change[profile_comparison$gene_id %in% diff_genes$stages] <- TRUE
+profile_comparison$deseq_any_profile_change[profile_comparison$gene_id %in% union(diff_genes$any_profile_changes, diff_genes$full_profile_changes)] <- TRUE
+profile_comparison$deseq_0_hpf_change[profile_comparison$gene_id %in% diff_genes$0_hpf] <- TRUE
+profile_comparison$deseq_1_hpf_change[profile_comparison$gene_id %in% diff_genes$`1_hpf`] <- TRUE
+profile_comparison$deseq_1_dpf_change[profile_comparison$gene_id %in% diff_genes$`1_dpf`] <- TRUE
+profile_comparison$deseq_3_dpf_change[profile_comparison$gene_id %in% diff_genes$`3_dpf`] <- TRUE
+
+# add rule-based profile classification data
+stages <- c("0_hpf", "1_hpf", "1_dpf", "3_dpf")
+for (stage in stages) {
+  matched_idx <- match(toupper(profile_comparison$gene_id), toupper(rownames(mean_sd$profile[[stage]])))
+  profile_data <- mean_sd$profile[[stage]][matched_idx, ]
+  colnames(profile_data) <- paste0(colnames(profile_data), "_", stage)
+  profile_comparison <- cbind(profile_comparison, profile_data)
+}
+```
+
+# **Degpattern clustering**
+```{r find clusters across the section per stage}
+# extract DLTs for each stage
+stage <- c("0_hpf", "1_hpf", "1_dpf", "3_dpf")
+
+for(name1 in stage){
+  diff_genes_temp1 <- profile_comparison$gene_id[profile_comparison[[paste0("deseq_", name1, "_change")]] %in% TRUE]
+  
+  # clustering of DLTs to determine animal / vegetal localization
+  deg_clusters[[name1]] <- deg_pattern_clustering_1(deseq_dataset = name1, degs_interest = diff_genes_temp1, groupDifference = 1)
+}
+
+# manual classification of identifies clusters was done after
+```
+```{r find clusters across stages}
+# extract dlts for stage changes
+diff_genes_temp1 <- profile_comparison$gene_id[profile_comparison$deseq_stage_change %in% TRUE]
+
+# Extract the rlog matrix from the object
+rld_mat_temp1 <- assay(rld$noblind$stages)
+
+# Use the vst values for DLTs of interest
+cluster_rlog_temp1 <- rld_mat_temp1[diff_genes_temp1, ]
+
+# cluster analysis
+temp1 <- samplesDESeq[["stages"]]
+temp1$Stage <- factor(temp1$Stage, levels = c("0_hpf", "1_hpf", "1_dpf", "3_dpf"))
+
+# clustering of DLTs to determine de novo / degradation
+deg_clusters[["stages"]] <- degPatterns(ma = cluster_rlog_temp1, metadata = temp1, time="Stage", minc = 1, cutoff = 0.7,
+                                        consensusCluster = FALSE, reduce = FALSE, groupDifference = 1)
+# cleanup names
+deg_clusters[["stages"]]$normalized <- cleanup_degpattern_names(degpattern_normalized_dataset = deg_clusters[["stages"]]$normalized)
+
+# manual classification of identifies clusters was done after
+```
+```{r find clusters across all stages and sections}
+# extract dlts for stage changes
+diff_genes_temp1 <- profile_comparison$gene_id[profile_comparison$deseq_any_profile_change %in% TRUE]
+
+# find genes that have 2x fold changes between the same section of different stages
+genes_2fold_change <- deg_pattern_position_clustering(deseq_dataset = "any_profile_changes", 
+                                                      degs_interest = diff_genes_temp1, 
+                                                      groupDifference = 1, position = "all")
+
+# run clustering
+deg_clusters[["any_profile_changes"]] <- deg_pattern_clustering_1(deseq_dataset = "any_profile_changes", 
+                                                                  degs_interest = genes_2fold_change, 
+                                                                  groupDifference = 1)
+
+# manual classification of identifies clusters was done after
+```
+
+# **Create finalized profile comparison**
+```{r reduce dataset to only those with profile}
+# only keep gene that had 2x changes in any of the conditions being tested
+temp1 <- profile_comparison %>%
+  filter(is.na(course_profile_0_hpf) &
+           is.na(course_profile_1_hpf) &
+           is.na(course_profile_1_dpf) &
+           is.na(course_profile_3_dpf) &
+           is.na(course_profile_stages) &
+           is.na(fine_any_profile_changes))
+
+profile_comparison <- profile_comparison[!(profile_comparison$gene_id %in% temp1$gene_id),]
+```
+```{r add information about pairwise stage changes}
+# Add pairwise stage comparison (denovo/degrade) to profile comparison
+for (stage_name in names(diff_genes$stages_pairwise)) {
+  deg_table <- diff_genes$stages_pairwise[[stage_name]]
+  
+  status_vec <- deg_table$status
+  names(status_vec) <- rownames(deg_table)
+  
+  profile_comparison[[stage_name]] <- NA
+  
+  idx <- profile_comparison$gene_id %in% names(status_vec) &
+    !is.na(profile_comparison$course_profile_stages)
+  
+  profile_comparison[[stage_name]][idx] <- status_vec[profile_comparison$gene_id[idx]]
+}
+```
+
+# **Cleanup and save object**
+```{r save individual objects}
+# Set up parallel plan
+plan(multicore)  # Efficient fork-based parallelism on Linux
+
+# List of object names to save
+object_names <- c("profile_comparison",
+                  "mean_sd",
+                  "deg_clusters")
+
+# Parallel saving loop
+future_lapply(object_names, function(name1) {
+  # Construct full file path with .qs2 extension
+  file_path <- file.path(here, "output", paste0(name1, ".qs2"))
+  
+  # Save the object by name using qs with multithreading
+  qs2::qs_save(get(name1), file = file_path,
+               compress_level = 3,
+               nthreads = parallel::detectCores() - 1)
+})
+
+# Reset plan to sequential after completion
+plan(sequential)
+```
+```{r load a particular object only}
+# Define the file path where your saved list is stored
+file_path <- file.path(here, "output", "profile_comparison.qs2")
+
+# Load the entire list of objects
+profile_comparison <- qs2::qs_read(file_path, 
+                      validate_checksum = TRUE,
+                      nthreads = parallel::detectCores()-1)
+```

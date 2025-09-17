@@ -1,0 +1,344 @@
+---
+title: "Gene regulon analysis using Scenic"
+author: "Ravindra Naraine"
+date: "March 03, 2025"
+subtitle: "Scenic regulon analysis"
+abstract: |
+  This notebook continues the analysis described in **RNA redistribution driven by alterations in transcription during early embryogenesis of rainbow trout**. It focuses on gene regulatory network inference using the SCENIC pipeline in *Oncorhynchus mykiss* (rainbow trout). Starting from differentially localized transcripts, it builds and filters an expression matrix mapped to zebrafish orthologs, infers regulons using pySCENIC (via Docker/Podman), and visualizes regulon activity using AUC scoring. The final output includes AUC heatmaps and trout-specific regulon annotations.
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+# **Scenic analysis**
+```{r setup, include=TRUE, cache=TRUE}
+# location of working folder
+here <- "./08_regulons/"
+```
+
+# **Install and Load Required Libraries**
+```{r libraries, echo=FALSE, message=FALSE, warning=FALSE}
+# Set memory limit for Java and reproducibility seed
+options(java.parameters = "-Xmx30000m")
+set.seed(100)
+
+# List of required packages (from CRAN and Bioconductor)
+required_packages <- c("dplyr", "ggplot2", "future", 
+                       "ComplexHeatmap", "qs2", 
+                       "future.apply", "SeuratExtend",
+                       "AUCell", "RColorBrewer")
+
+# Apply the function to load required packages
+invisible(lapply(required_packages, function(x) {
+  suppressPackageStartupMessages(library(x, character.only = TRUE))
+}))
+```
+
+# **Scenic docker installation**
+```{bash install scenic}
+# newest version works only with feather v2
+# install older version of scenic so that feature v1 can work
+# podman pull docker pull aertslab/pyscenic:0.11.2
+sudo podman pull docker://aertslab/pyscenic:0.11.2
+```
+
+# **load object variables**
+```{r}
+# Define the file path where your saved list is stored
+file_path <- file.path(here, "../02_deseq_analysis", "output")
+
+# sample metadata
+samplesDESeq <- qs_read(file.path(file_path, "samplesDESeq.qs2"),
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# load in DESeq2 data
+ddsTC <- qs_read(file.path(file_path, "ddsTC.qs2"),
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# load in variance stabilized transformation of gene counts
+rld <- qs_read(file.path(file_path, "rld.qs2"),
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# Define the file path where your saved list is stored
+file_path <- file.path(here, "../05_orthology", "output")
+
+# load in DLT data for trout
+profile_comparison <- qs_read(file.path(file_path, "profile_comparison.qs2"),
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# cistarget for zebrafish downloaded from
+# Spatiotemporal mapping of gene expression landscapes and developmental trajectories during zebrafish embryogenesis
+# https://db.cngb.org/search/project/CNP0002220/
+# https://ftp.cngb.org/pub/SciRAID/stomics/STDS0000057/cisTarget/
+```
+
+# **create expression matrix with zebrafish names**
+```{r}
+# Aggregate counts across same zebrafish gene symbols
+# Subset DLT genes to only those with zebrafish annotations
+data_key <- profile_comparison[!is.na(profile_comparison$zebrafish_human),]
+
+# get normalized counts
+expr_df <- DESeq2::counts(object = ddsTC$any_profile_changes, normalized = TRUE)
+expr_df <- expr_df[rownames(expr_df) %in% data_key$gene_id,]
+
+# transfer zebrafish gene symbols to gene_id in expression matrix
+expr_df <- expr_df %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column(var = "gene_id")
+
+# Now do the join using the "gene_id" column
+expr_df <- expr_df %>%
+  left_join(y = data_key[, c("gene_id", "zebrafish_human")], 
+            by = "gene_id")
+
+# Collapse duplicated genes by their zebrafish_human ortholog,
+expr_df <- expr_df %>%
+  # Group rows by the 'zebrafish_human' gene symbol
+  group_by(zebrafish_human) %>%
+  # For each group, sum all numeric expression values and round the result
+  summarise(across(where(is.numeric), ~ round(sum(.)))) %>%
+  # Convert the 'zebrafish_human' column to row names for matrix-style compatibility
+  tibble::column_to_rownames("zebrafish_human")
+
+# import list of transcription factors (tf)
+dir_path <- file.path(here, "data")
+temp2_tf <- read.csv(file = file.path(here, "data", "tf_cisbp_namelist.txt"), 
+                     header = F, stringsAsFactors = F, col.names = "tf")
+
+# import feather file
+feather_file <- read_feather(path = file.path(here, "data", "zebrafish_genes_vs_motifs.ranking.feather"))
+
+# filter only for genes in the feather file
+exp_matrix <- expr_df[(rownames(expr_df) %in% colnames(feather_file)),]
+
+# filter only for genes in the feather file
+data_key <- data_key[data_key$zebrafish_human %in% colnames(feather_file),]
+
+# write expression matrix to file
+write.table(x = expr_df, file = file.path(here, "output", "exprMat_filter.csv"), sep = ",", row.names = TRUE, col.names = TRUE)
+```
+
+# **create loom file of expression matrix**
+```{r create loom file}
+# read in matrix file input
+temp2 <- read.csv2(file = file.path(here, "output", "exprMat_filter.csv"), sep = ",")
+
+# write data for scenic
+loom <- build_loom(file.name = file.path(here, "output", "exprMat_filter.loom"), dgem=temp2)
+close_loom(loom)
+```
+
+# **Run Scenic**
+```{bash 1st part - Compute the GRNs}
+sudo podman run -it --rm \
+    -v ~/08_regulons:~/08_regulons \
+    aertslab/pyscenic:0.11.2 pyscenic grn \
+        --num_workers 50 \
+        -o ~/08_regulons/output/expr_mat.adjacencies.tsv \
+        ~/08_regulons/output/exprMat_filter.loom \
+        ~/08_regulons/data/tf_cisbp_namelist.txt
+```
+```{bash 2nd part - - Regulons}
+sudo podman run -it --rm \
+    -v ~/08_regulons:~/08_regulons \
+    aertslab/pyscenic:0.11.2 pyscenic ctx \
+        ~/08_regulons/output/expr_mat.adjacencies.tsv \
+        ~/08_regulons/data/zebrafish_genes_vs_motifs.ranking.feather \
+        --annotations_fname ~/08_regulons/data/zebrafish.tbl \
+        --expression_mtx_fname ~/08_regulons/output/exprMat_filter.loom \
+        --mode "custom_multiprocessing" \
+        --output ~/08_regulons/output/regulons.csv \
+        --num_workers 50
+```
+```{bash 3rd part - - AuCell}
+sudo podman run -it --rm \
+   -v ~/08_regulons:~/08_regulons \
+    aertslab/pyscenic:0.11.2 pyscenic aucell \
+        ~/08_regulons/output/exprMat_filter.loom \
+        ~/08_regulons/output/regulons.csv \
+        -o ~/08_regulons/output/auc_mtx.loom \
+        --num_workers 50
+```
+
+# **Import pyScenic loom results**
+```{r import pyScenic loom results}
+# import loom results
+loom <- open_loom(file.path(here, "output", "auc_mtx.loom"))
+  # read information from the loom file
+  exprMat <- get_dgem(loom)
+  exprMat_log <- log2(exprMat+1)
+  regulons_incidMat <- get_regulons(loom, column.attr.name = "Regulons")
+  regulons <- regulonsToGeneLists(regulons_incidMat) # a list of identified TFs and their targets
+  regulonAUC <- get_regulons_AUC(loom, column.attr.name = 'RegulonsAUC') # AUCobject contains AUC values for each cell
+  regulonAucThresholds_prep <- get_regulon_thresholds(loom) %>% gsub("[(+)]", "", .)
+  regulonAucThresholds <- names(regulonAucThresholds_prep) %>% as.double
+  names(regulonAucThresholds) <- regulonAucThresholds_prep
+  embeddings <- get_embeddings(loom)
+close_loom(loom)
+
+motifEnrichment <- data.table::fread(file.path(here, "output", "regulons.csv"), header = T, skip = 1)[-1,]; colnames(motifEnrichment)[1:2] <- c("TF", "MotifID")
+
+scenic <- list('regulons' = regulons, 
+             'regulonAUC' = regulonAUC, 
+             'regulonAUCthresholds' = regulonAucThresholds, 
+             'exprMat_log' = exprMat_log)
+```
+```{r write significant regulon info}
+# import metadata
+samplesDESeq$any_profile_changes$stage_position <- paste0(samplesDESeq$any_profile_changes$Stage, "_", samplesDESeq$any_profile_changes$Position)
+samplesDESeq$any_profile_changes$stage_position <- factor(samplesDESeq$any_profile_changes$stage_position, 
+                                                          levels = c("0_hpf_A", "0_hpf_B", "0_hpf_C", "0_hpf_D", "0_hpf_E",
+                                                                     "1_hpf_A", "1_hpf_B", "1_hpf_C", "1_hpf_D", "1_hpf_E",
+                                                                     "1_dpf_A", "1_dpf_B", "1_dpf_C", "1_dpf_D", "1_dpf_E",
+                                                                     "3_dpf_A", "3_dpf_B", "3_dpf_C", "3_dpf_D", "3_dpf_E"))
+
+# create dataframe with the regulons tf and gene acted on 
+temp200 <- data.frame("transcription_factor_dr" = gsub(pattern = "[(+)]", replacement = "", x = rownames(scenic$regulonAUC)))
+
+# find trout tf from data
+temp200$transcription_factor_trout <- data_key$gene_id[match(temp200$transcription_factor_dr, data_key$zebrafish_human)]
+
+temp200$target_genes_dr <- NA
+temp200$target_genes_trout <- NA
+for(name1 in 1:nrow(temp200)){
+  temp300 <- NA
+  temp300 <- unlist(scenic$regulons[names(scenic$regulons) %in% paste0(temp200$transcription_factor_dr[name1], "(+)")])
+  temp200$target_genes_dr[name1] <- paste0(temp300, collapse = ", ")
+  temp200$target_genes_trout[name1] <- paste0(data_key$gene_id[match(temp300, data_key$zebrafish_human)], collapse = ", ")
+}  
+regulons_final <- temp200
+
+dir_path <- file.path(here, "output", "scenic")
+write.csv(x = temp200, file = file.path(here, "output", "regulons_final.csv"))
+```
+
+# **Plot AUC scores**
+```{r}
+# Get the averaged AUC score across the replicates
+tf_auc <- scenic$regulonAUC@assays@data$AUC
+temp1 <- samplesDESeq[["any_profile_changes"]]$stage_position
+names(temp1) <- rownames(samplesDESeq[["any_profile_changes"]])
+tf_zscore <- CalcStats(tf_auc, f = temp1, n = 20, order = "p", method = "mean")
+tf_zscore <- tf_zscore[!apply(tf_zscore, 1, function(x) all(is.na(x))),]
+rownames(tf_zscore) <- gsub(pattern = "\\(.*", replacement = "", x = rownames(tf_zscore))
+
+# Order columns by metadata
+order_by <- samplesDESeq[["any_profile_changes"]]$stage_position
+ordered_cols <- order(order_by)
+
+# Create annotation for samples
+my_sample_col <- data.frame(
+  sample = colnames(tf_zscore),
+  position = gsub(pattern = ".*_", replacement = "", colnames(tf_zscore)),
+  stage = gsub(pattern = "_[A-E].*", replacement = "", colnames(tf_zscore))
+)
+rownames(my_sample_col) <- my_sample_col$sample
+my_sample_col$stage <- factor(my_sample_col$stage, levels = c("0_hpf", "1_hpf", "1_dpf", "3_dpf"))
+my_sample_col <- my_sample_col[,-c(1)]
+
+# Define annotation colors
+ann_colors <- list(
+  stage = c("0_hpf" = "#F8766D", "1_hpf" = "#7CAE00", "1_dpf" = "#00BFC4", "3_dpf" = "#C77CFF"),
+  position = c("A" = "#9D88C1", "B" = "#CCC8E1", "C" = "#e2ccc0", "D" = "#FED098", "E" = "#F2AB79")
+)
+
+# Create row annotation
+row_ha <- rowAnnotation(
+  df = my_sample_col,
+  col = ann_colors,
+  simple_anno_size = unit(3, "mm"),
+  annotation_name_gp = gpar(fontsize = 0),
+  annotation_legend_param = list(
+    title_gp = gpar(fontsize = 10),
+    labels_gp = gpar(fontsize = 10),
+    legend_height = unit(c(1, 1), "cm")
+  ),
+  annotation_name = NULL
+)
+
+# Define breaks and color palette
+breaks_list <- seq(-3, 3, by = 0.01)
+heatmap_colors <- colorRampPalette(rev(brewer.pal(n = 7, name = "BrBG")))(length(breaks_list))
+
+temp102 <- t(apply(tf_zscore, 1, function(x) {
+  if (sd(x, na.rm = TRUE) == 0) {
+    return(rep(0, length(x)))  # Replace constant rows with zeros
+  } else {
+    return(scale(x))
+  }
+}))
+colnames(temp102) <- colnames(tf_zscore)
+
+# Generate the heatmap
+temp300 <- ComplexHeatmap::pheatmap(
+  mat = t(as.matrix(temp102)), 
+  scale = "none", 
+  cluster_rows = FALSE, 
+  cluster_cols = TRUE, 
+  show_rownames = FALSE, 
+  show_colnames = TRUE , 
+  color = heatmap_colors,
+  treeheight_row = 0, 
+  treeheight_col = 0, 
+  left_annotation = row_ha,
+  show_row_dend = FALSE,
+  show_column_dend = FALSE,
+  row_split = as.factor(my_sample_col$stage),
+  fontsize = 10, 
+  fontface = "italic",
+  column_title = NULL,  
+  row_title = NULL,
+  name = NULL,
+  fontfamily = "Arial",
+  legend = TRUE,         
+  annotation_legend = FALSE,
+  breaks = breaks_list, 
+  use_raster = FALSE, 
+  border = NA,
+  column_names_side = "top"
+)
+
+p_2 <- grid.grabExpr(print(ComplexHeatmap::draw(temp300, ht_gap = unit(5, "mm"),
+                                                show_heatmap_legend = TRUE, show_annotation_legend = FALSE,
+                                                padding = unit(c(2, 5, 15, 5), "mm"))))
+```
+
+# **Cleanup and save object**
+```{r save individual objects}
+# Set up parallel plan
+plan(multicore)  # Efficient fork-based parallelism on Linux
+
+# List of object names to save
+object_names <- c("scenic",
+                  "motifEnrichment", 
+                  "tf_zscore", 
+                  "regulons_final")
+
+# Parallel saving loop
+future_lapply(object_names, function(name1) {
+  # Construct full file path with .qs2 extension
+  file_path <- file.path(here, "output", paste0(name1, ".qs2"))
+  
+  # Save the object by name using qs with multithreading
+  qs2::qs_save(get(name1), file = file_path,
+               compress_level = 3,
+               nthreads = parallel::detectCores() - 1)
+})
+
+# Reset plan to sequential after completion
+plan(sequential)
+```
+```{r load a particular object only}
+# Define the file path where your saved list is stored
+file_path <- file.path(here, "output", "scenic.qs2")
+
+# Load the entire list of objects
+scenic <- qs2::qs_read(file_path, 
+                      validate_checksum = TRUE,
+                      nthreads = parallel::detectCores()-1)
+```

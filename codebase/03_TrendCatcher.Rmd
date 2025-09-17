@@ -1,0 +1,310 @@
+---
+title: "TrendCatcher analysis"
+author: "Ravindra Naraine"
+date: "February 20, 2025"
+subtitle: "Differential Expression Analysis using TrendCatcher"
+abstract: |
+  This notebook continues the analysis described in **RNA redistribution driven by alterations in transcription during early embryogenesis of rainbow trout**. It performs dynamic transcriptome profiling of TOMO-Seq data from *Oncorhynchus mykiss* (trout) using the TrendCatcher algorithm. Differentially localized transcripts (DLTs), previously identified with DESeq2, are analyzed to detect time-dependent expression trends across spatial sections (animal–vegetal axis) and developmental stages (0-hpf, 1-hpf, 1-dpf, 3-dpf). The workflow includes preprocessing of DESeq2-normalized counts, automated time-label mapping, TrendCatcher-based dynamic modeling, and filtering of significant genes based on adjusted p-values (dyn.p.val.adj < 0.01) and expression amplitude thresholds (>100 fitted count difference). Outputs include stage-specific and cross-stage trend profiles, filtered significant gene lists, and data-ready objects for downstream visualization and functional enrichment analysis.
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+# **TrendCatcher analysis**
+```{r setup, include=TRUE, cache=TRUE}
+# location of working folder
+here <- "./03_trendcatcher/"
+```
+
+# **Install and Load Required Libraries**
+```{r libraries, echo=FALSE, message=FALSE, warning=FALSE}
+# Set memory limit for Java and reproducibility seed
+options(java.parameters = "-Xmx30000m")
+set.seed(100)
+
+# List of required packages (from CRAN and Bioconductor)
+required_packages <- c("dplyr", "tidyr",
+                       "tibble", "future",
+                       "parallel", "TrendCatcher",
+                       "DESeq2", "qs2",
+                       "here", "future.apply")
+
+# Apply the function to load required packages
+invisible(lapply(required_packages, function(x) {
+  suppressPackageStartupMessages(library(x, character.only = TRUE))
+}))
+```
+
+# **Define objects**
+```{r define objects}
+# object to store trendcatcher data
+trendcatcher_data <- list()
+
+# trendcatcher data filtered for padj < 0.01 and 100 count difference
+trendcatcher_data_filtered <- list()
+```
+
+# **Load in DESeq2 objects and metadata**
+```{r load DESeq2 objects}
+# Define the file path where your saved list is stored
+file_path <- file.path(here, "../02_deseq_analysis", "output")
+
+# Load DESeq2 object
+ddsTC <- qs2::qs_read(paste0(file_path, "ddsTC.qs2"),
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# sample metadata
+samplesDESeq <- qs2::qs_read(paste0(file_path, "samplesDESeq.qs2"), 
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+
+# differentially localized transcripts
+diff_genes <- qs2::qs_read(paste0(file_path, "diff_genes.qs2"), 
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+```
+
+# **Run trendcatcher**
+```{r trendcatcher for changes wihin individual stages}
+# Define the stages and replicate groups
+stages <- c("0_hpf", "1_hpf", "1_dpf", "3_dpf")
+groups <- c("A", "B", "C", "D", "E")
+
+# labels to convert position to time values
+time_labels <- c("0", "1", "2", "3", "4")
+
+# Loop over each stage
+for (stage in stages) {
+  
+  # get list of DESeq2 DLTs for that stage
+  deg_genes <- diff_genes[[stage]]
+  
+  # Extract the normalized counts from the DESeq2 object for the current stage 
+  # subset the genes to the DESeq2 derived DLTs for that stage
+  raw_counts <- round(counts(object = ddsTC[[stage]], normalized = TRUE), digits = 0)[deg_genes,]
+  # add a pseudo count of 1 to each gene
+  raw_counts <- raw_counts + 1
+  
+  # Process each replicate group: select columns and rename them in the format "T_<time_label>_Rep<replicate_number>"
+  grouped_counts <- mapply(function(group, time_label) {
+    cols <- grep(paste0("_", group, "_"), colnames(raw_counts))
+    sub_mat <- raw_counts[, cols, drop = FALSE]
+    colnames(sub_mat) <- paste0("T_", time_label, "_Rep", seq_len(ncol(sub_mat)))
+    sub_mat
+  }, group = groups, time_label = time_labels, SIMPLIFY = FALSE)
+  
+  # Combine all replicate groups into one matrix
+  combined_counts <- do.call(cbind, grouped_counts)
+  
+  # Create the output directory for the current stage if it doesn't exist
+  dir_path <- file.path(here, "output", stage)
+  dir.create(dir_path, showWarnings = FALSE, recursive = TRUE)
+  
+  # Define the CSV output file path and write the combined counts (row names preserved)
+  output_csv <- file.path(dir_path, paste0(stage, "_normalized_counts.csv"))
+  write.csv(combined_counts, file = output_csv, row.names = TRUE)
+  
+  # Run TrendCatcher with specified parameters
+  master_list <- NULL
+  master_list <- run_TrendCatcher(count.table.path = output_csv,
+                                  baseline.t = 0,
+                                  time.unit = "h",
+                                  min.low.count = 0,
+                                  para.core.n = 5,
+                                  dyn.p.thres = 0.01)
+  
+  # add a Symbol column that duplicates the Gene names
+  master_list$master.table$Symbol <- master_list$master.table$Gene
+  
+  # Store the TrendCatcher results in a list
+  trendcatcher_data[[stage]] <- master_list
+}
+```
+```{r trendcatcher for changes in total transcript across stages}
+# Define the stages and replicate groups
+stages <- c("stages")
+groups <- c("0_hpf", "1_hpf", "1_dpf", "3_dpf")
+
+# labels to convert position to time values
+time_labels <- c("0", "1", "2", "3")
+
+# Loop over each stage
+for(stage in stages){
+  
+  # get list of DESeq2 degs for that stage
+  deg_genes <- diff_genes[[stage]]
+  
+  # Extract the normalized counts from the DESeq2 object for the current stage 
+  # subset the genes to the DESeq2 derived DEGs for that stage
+  raw_counts <- round(counts(object = ddsTC[[stage]], normalized = TRUE), digits = 0)[deg_genes,]
+  # add a pseudo count of 1 to each gene
+  raw_counts <- raw_counts + 1
+  
+  # Process each replicate group: select columns and rename them in the format "T_<time_label>_Rep<replicate_number>"
+  grouped_counts <- mapply(function(group, time_label) {
+    cols <- grep(paste0("_", group, "_"), colnames(raw_counts))
+    sub_mat <- raw_counts[, cols, drop = FALSE]
+    colnames(sub_mat) <- paste0("T_", time_label, "_Rep", seq_len(ncol(sub_mat)))
+    sub_mat
+  }, group = groups, time_label = time_labels, SIMPLIFY = FALSE)
+  
+  # Combine all replicate groups into one matrix
+  combined_counts <- do.call(cbind, grouped_counts)
+  
+  # Create the output directory for the current stage if it doesn't exist
+  dir_path <- file.path(here, "output", stage)
+  dir.create(dir_path, showWarnings = FALSE, recursive = TRUE)
+  
+  # Define the CSV output file path and write the combined counts (row names preserved)
+  output_csv <- file.path(dir_path, paste0(stage, "_normalized_counts.csv"))
+  write.csv(combined_counts, file = output_csv, row.names = TRUE)
+  
+  # Run TrendCatcher with specified parameters
+  master_list <- NULL
+  master_list <- run_TrendCatcher(count.table.path = output_csv,
+                                  baseline.t = 0,
+                                  time.unit = "h",
+                                  min.low.count = 0,
+                                  para.core.n = 5,
+                                  dyn.p.thres = 0.01)
+  
+  # Add a Symbol column that duplicates the Gene names
+  master_list$master.table$Symbol <- master_list$master.table$Gene
+  
+  # Store the TrendCatcher results in the list
+  trendcatcher_data[[stage]] <- master_list
+}
+```
+```{r trendcatcher for changes in all sections and stages}
+# Extract the normalized counts (rounded to integers)
+raw_counts <- round(counts(object = ddsTC$any_profile_changes, normalized = TRUE), digits = 0)
+
+# Subset genes: keep only those with DESeq2 derived DLTs
+raw_counts <- raw_counts[union(diff_genes$full_profile_changes, diff_genes$any_profile_changes),]
+# add a pseudo count of 1 to each gene
+raw_counts <- raw_counts + 1
+
+# Define cell type patterns with their starting time offsets
+stage_types <- list(
+  "0_hpf"   = 0,   # time labels: 0, 1, 2, 3, 4
+  "1_hpf"  = 5,   # time labels: 5, 6, 7, 8, 9
+  "1_dpf" = 10,  # time labels: 10, 11, 12, 13, 14
+  "3_dpf" = 15 # time labels: 15, 16, 17, 18, 19
+)
+
+# Loop over cell types and replicate groups (A to E) to rename columns and combine matrices
+combined_counts <- NULL
+
+for (ct in names(stage_types)) {
+  offset <- stage_types[[ct]]
+  # Process replicate groups A, B, C, D, E
+  group_mats <- lapply(1:5, function(i) {
+    group_letter <- LETTERS[i]  # "A", "B", "C", "D", "E"
+    pattern <- paste0("^trout_", ct, "_", group_letter, "_")  # e.g., "^1_hpf_A_"
+    sub_mat <- raw_counts[, grep(pattern, colnames(raw_counts)), drop = FALSE]
+    # New column names: "T_<time>_Rep<replicate number>"
+    new_names <- paste0("T_", offset + i - 1, "_Rep", seq_len(ncol(sub_mat)))
+    colnames(sub_mat) <- new_names
+    return(sub_mat)
+  })
+  # Combine columns for this stage type
+  cell_combined <- do.call(cbind, group_mats)
+  # Append to the overall matrix
+  if (is.null(combined_counts)) {
+    combined_counts <- cell_combined
+  } else {
+    combined_counts <- cbind(combined_counts, cell_combined)
+  }
+}
+
+# Write the normalized counts to file
+dir_path <- file.path(here, "output", "stage_section")
+dir.create(dir_path, showWarnings = FALSE, recursive = TRUE)
+output_csv <- file.path(dir_path, "stage_section_normalized.csv")
+write.csv(combined_counts, file = output_csv, row.names = TRUE)
+
+# Run TrendCatcher with the specified parameters
+master_list <- run_TrendCatcher(count.table.path = output_csv,
+                                baseline.t = 0,
+                                time.unit = "h",
+                                min.low.count = 0,
+                                para.core.n = 5,
+                                dyn.p.thres = 0.01)
+
+# Close any open connections
+closeAllConnections()
+
+# Add a Symbol column duplicating the Gene names
+master_list$master.table$Symbol <- master_list$master.table$Gene
+
+# Store the TrendCatcher results
+trendcatcher_data[["stage_section"]] <- master_list
+```
+
+# **Filter trendcatcher data**
+```{r filter trendcatcher data}
+# filter for genes with padj < 0.01 
+# filter for genes that are changing by at least 100 counts between either section or stage
+
+for(name1 in names(trendcatcher_data)){
+  
+  # Extract significant genes from TrendCatcher (dyn.p.val.adj < 0.01)
+  sig_trend <- trendcatcher_data[[name1]]$fitted.count %>%
+    filter(dyn.p.val.adj < 0.01) %>%
+    dplyr::select(Gene, Time, Fit.Count)
+  
+  # Count unique genes
+  unique_gene_count <- n_distinct(sig_trend$Gene)
+  cat(name1, ": Unique significant genes:", unique_gene_count, "\n")
+  
+  # Reshape data from long to wide format (one row per gene)
+  df_wide <- sig_trend %>%
+    pivot_wider(names_from = Time, values_from = Fit.Count) %>%
+    column_to_rownames("Gene")
+  
+  # Identify genes with a range (max-min) greater than 100
+  gene_range_filter <- apply(df_wide, 1, function(x) diff(range(x, na.rm = TRUE)) > 100)
+  df_filtered <- df_wide[gene_range_filter, ]
+  df_removed  <- df_wide[!gene_range_filter, ]
+  
+  cat(name1, ": Genes kept:", nrow(df_filtered), "\n")
+  cat(name1, ": Genes filtered out:", nrow(df_removed), "\n")
+  
+  # Save the filtered data for the current stage
+  trendcatcher_data_filtered[[name1]] <- df_filtered
+}
+```
+
+# **Cleanup and save object**
+```{r save individual objects}
+# Set up parallel plan
+plan(multicore)  # Efficient fork-based parallelism on Linux
+
+# List of object names to save
+object_names <- c("trendcatcher_data",
+                  "trendcatcher_data_filtered")
+
+# Parallel saving loop
+future_lapply(object_names, function(name1) {
+  # Construct full file path with .qs2 extension
+  file_path <- file.path(here, "output", paste0(name1, ".qs2"))
+  
+  # Save the object by name using qs with multithreading
+  qs2::qs_save(get(name1), file = file_path,
+            compress_level = 3,
+            nthreads = parallel::detectCores() - 1)
+})
+
+# Reset plan to sequential after completion
+plan(sequential)
+```
+```{r load a particular object only}
+# Define the file path where your saved list is stored
+file_path <- file.path(here, "output", "trendcatcher_data.qs2")
+
+# Load the entire list of objects
+trendcatcher_data <- qs2::qs_read(file_path, 
+                    validate_checksum = TRUE,
+                    nthreads = parallel::detectCores()-1)
+```

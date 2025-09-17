@@ -1,0 +1,348 @@
+---
+title: "FASTQ preprocessing"
+author: "Ravindra Naraine"
+date: "July, 15 2025"
+abstract: |
+  This notebook is designed to accompany the analysis described in **RNA redistribution driven by alterations in transcription during early embryogenesis of rainbow trout**. It outlines a step-by-step preprocessing pipeline for TOMO-Seq data derived from the following models: *Oncorhynchus mykiss* (rainbow trout), a hybrid of *O. mykiss* and *Salvelinus fontinalis* (brook trout), and *Danio rerio* (zebrafish). It includes quality control, adapter trimming (fastp), removal of ribosomal RNA (RiboDetector), filtering of mitochondrial sequences (SortMeRNA), genome alignment (STAR), and transcript quantification (HTSeq). This workflow generates a gene-level count matrix suitable for downstream differential expression analysis.
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+Workflow Overview  
+-----------------------------------------------------------------
+1. FASTQ input  
+2. Quality control (FastQC)  
+3. Adapter trimming (fastp)  
+4. rRNA filtering (RiboDetector)  
+5. mtDNA filtering (SortMeRNA)  
+6. Alignment (STAR)  
+7. Transcript quantification (HTSeq)
+
+Step 1: Load metadata and create folders
+-----------------------------------------------------------------
+```{r metadata & working folders}
+# location of working folder
+here <- "./01_fastq_preprocessing/"
+
+# sample metadata
+samples <- read.table(file = file.path(here, "data", "01_samples_metadata.csv"), 
+                      header = T, sep = ",", stringsAsFactors = FALSE)
+
+# create working folders
+system(paste0(
+  # quality control
+  "mkdir -p ", here, "output/01_qa/raw ;\n",
+  "mkdir -p ", here, "output/01_qa/fastp ;\n",
+  "mkdir -p ", here, "output/01_qa/sortmerna ;\n",
+  "mkdir -p ", here, "output/01_qa/qualimap ;\n",
+  
+  # trim adaptors
+  "mkdir -p ", here, "output/02_trimming/fastp ;\n",
+  
+  # removal of rRNA and mtDNA
+  "mkdir -p ", here, "output/03_rrna_removal/sortmerna ;\n",
+  "mkdir -p ", here, "output/03_rrna_removal/ribodetector ;\n",
+  
+  # aligners
+  "mkdir -p ", here, "output/04_alignments/STAR ;\n",
+
+  # feature counts
+  "mkdir -p ", here, "output/05_count/htcounts ;\n",
+))
+```
+
+Step 2: Define tool paths
+-----------------------------------------------------------------
+```{r tools location}
+# tools
+tools_location <- "~/software/tools/"
+
+# quality control
+fastqc_source <- file.path(tools_location, "fastqc_v0.12.1", "fastqc") #v0.12.1
+
+# adaptor trimming
+fastp_source <- file.path(tools_location, "fastp_v0.23.4", "fastp") #v.0.23.4
+
+# rRNA and/or mtDNA filtering
+sortmerna_source <- file.path(tools_location, "sortmerna-4.3.6-Linux", "bin", "sortmerna") #SortMeRNA version 4.3.6
+ribodetector_source <- file.path(tools_location, "conda", "env", "ribodetector", "bin", "ribodetector_cpu") #v.0.3.1 (mamba create -n ribodetector python=3.8 ribodetector -c bioconda)
+
+# genome/transcriptome aligners
+star_source <- file.path(tools_location, "conda", "env", "star", "bin", "STAR") #v.2.7.11a (mamba create -n star STAR=2.7.11a -c bioconda)
+strandness_docker <- "mgibio/checkstrandedness" #v1.0.1 #https://registry.hub.docker.com/r/mgibio/checkstrandedness/tags #docker pull mgibio/checkstrandedness:latest
+qualimap_source <- file.path(tools_location, "conda", "env", "qualimap", "bin", "qualimap") #v2.3 (mamba create -n qualimap qualimap=2.3 -c bioconda)
+
+# gene counting
+htseq_count_source <- file.path(tools_location, "conda", "env", "htseq", "bin", "htseq-count") #v.2.0.4 (mamba create -n htseq htseq=2.0.4 -c bioconda)
+
+# reference genome/transcriptome
+# For trout TOMO-Seq: https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_013265735.2/
+# For trout-hybrid TOMO-Seq: https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_029448725.1/
+# For zebrafish TOMO-Seq: https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_000002035.6/
+genome_folder <- "~/genome/refernce/ncbi_dataset/data/"
+ref_transcriptome <- file.path(genome_folder, "rna.fna")
+ref_gtf <- file.path(genome_folder, "genomic.gtf")
+ref_genome <-file.path(genome_folder, "genomic.fna")
+
+# source directories of raw fastq
+raw_file <- file.path(here, "data", "raw") # source to raw sequencing data
+
+# sortmerna index location
+sortmerna_index <- "~/genome/rRNA_database/sortmerna/"
+
+# sortmerna mtDNA reference location
+mtDNA_source <- "~/genome/rRNA_database/"
+
+# sortmerna mtDNA location
+# For trout TOMO-Seq & trout-hybrid TOMO-Seq: mtDNA_oncorhynchus_mykiss_NC_001717.1.fasta (https://www.ncbi.nlm.nih.gov/nuccore/NC_001717.1)
+# For zebrafish TOMO-Seq: mtDNA_danio_rerio_NC_002333.2.fasta (https://www.ncbi.nlm.nih.gov/nuccore/NC_002333.2/)
+mtDNA_ref <- paste0("--ref ", mtDNA_source, "mtDNA_reference.fasta")
+```
+
+Step 3: FastQC – raw reads
+-----------------------------------------------------------------
+```{r raw:fastqc}
+# fastqc
+temp1 <- c(samples$read1_file, samples$read2_file)
+system(paste0("cd ", raw_file, "&&", 
+              fastqc_source, 
+              " -t 100 ", 
+              paste0(temp1, collapse = " "), 
+              " -o ", here, "output/01_qa/raw/"))
+```
+
+Step 4: Trimming – fastp
+-----------------------------------------------------------------
+```{r run fastp}
+for(i in seq_len(nrow(samples))){
+  system(paste0("cd ", here, "output/01_qa/fastp && ",
+                fastp_source,
+                
+                # read 1 input
+                " --in1 ", raw_file, samples$read1_file[i], 
+                # read1 output trimmed for adapters
+                " --out1 ", here, "output/02_trimming/fastp/TRIM_", samples$read1_file[i], 
+                
+                # read 2 input
+                " --in2 ", raw_file, samples$read2_file[i],
+                # read2 output trimmed for adapters
+                " --out2 ", here, "output/02_trimming/fastp/TRIM_", samples$read2_file[i],
+                
+                # reads that read1 passes filters but its paired read2 doesn't
+                " --unpaired1 ", here, "output/02_trimming/fastp/unTRIM_", samples$read1_file[i],  
+                
+                # reads that read2 passes filters but its paired read1 doesn't
+                " --unpaired2 ", here, "output/02_trimming/fastp/unTRIM_", samples$read2_file[i],
+                
+                # output detail in fastq name on why read failed
+                " --failed_out ", here, "output/02_trimming/fastp/failed_", samples$library_name[i],
+                
+                " --qualified_quality_phred 15 ", # a base is deemed to be ok if it has >=Q15 quality
+                " --unqualified_percent_limit 40 ", # 40% of bases allowed below qualification criteria before rejecting read
+                " --length_required 36 ", # reads shorter than 36 after filtering is discarded
+                
+                " --adapter_sequence=AGATCGGAAGAGCACACGTCTGAACTCCAGTCA ",    # library prep adapter
+                " --adapter_sequence_r2=AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT ", # library prep adapter
+                " --trim_front1 12 ", # trim the first 12 bases of read 1 for Trout-TOMO-Seq and Zebrafish-TOMO-Seq; 
+                                      # 5 for trout-hybrid TOMO-Seq (check fastqc for guidance)
+                " --trim_front2 12 ", # trim the first 12 bases of read 1 for Trout-TOMO-Seq and Zebrafish-TOMO-Seq; 
+                                      # 5 for trout-hybrid TOMO-Seq (check fastqc for guidance)
+                " --trim_tail1 3 ",   # trim the last 3 bases of read 1 (check fastqc for guidance)
+                " --trim_tail2 3 ",   # trim the last 3 bases of read 2 (check fastqc for guidance)
+                
+                # sliding window filtering
+                " --cut_front ",
+                " --cut_right ",
+                " --cut_right_window_size 4",
+                " --cut_right_mean_quality 20 ",
+                
+                " --trim_poly_g 10", # remove ployG tails (>10 bases) trails that are present from NovaSeq/NextSeq data
+                " --overrepresentation_analysis ", # check every 1 in 20 reads for overrepresented sequences
+                " --thread 16 ", # number of CPUs to use
+                
+                # name of output report
+                " --json=", samples$library_name[i], "_fastp.json",
+                " --html=", samples$library_name[i], "_fastp.html", 
+                " --report_title=\\\"", samples$library_name[i], "\\\""
+  ))
+}
+```
+```{r fastp:fastqc}
+# fastqc
+temp1 <- list.files(file.path(here, "output", "02_trimming", "fastp"), pattern = "^TRIM", full.names = FALSE)
+system(paste0("cd ", here, "output/02_trimming/fastp/", " && ", 
+              fastqc_source, " -t 12 ", 
+              paste0(temp1, collapse = " "), 
+              " -o ", here, "output/01_qa/fastp/"))
+```
+
+Step 5: Filter rRNA and mtDNA
+-----------------------------------------------------------------
+```{r run ribodetector}
+# choose which trimming folder to use
+trim_folder <- "fastp"
+for(i in seq_len(nrow(samples))){
+  system(paste0(ribodetector_source,
+                " -t 70 ", # number of CPUs to use
+                " --len 61 ", # mean length of sequencing reads (Trout 61; Trout-hybrid 54; Zebrafish 47)
+                
+                # input read 1 and read 2
+                " --input ", here, "/output/02_trimming/", trim_folder, "/TRIM_", samples$read1_file[i], " ",
+                             here, "output/02_trimming/", trim_folder, "/TRIM_", samples$read2_file[i],
+                
+                # output of reads after rRNAs removal
+                " --output ", here, "output/03_rrna_removal/ribodetector/", samples$library_name[i], "_ribodetector_fwd.fq.gz ",
+                              here, "output/03_rrna_removal/ribodetector/", samples$library_name[i], "_ribodetector_rev.fq.gz ",
+                
+                # output of reads with detected rRNAs
+                " --rrna ", here, "output/03_rrna_removal/ribodetector/", samples$library_name[i], "_aligned_fwd.fq.gz ",
+                            here, "output/03_rrna_removal/ribodetector/", samples$library_name[i], "_aligned_rev.fq.gz ",
+                
+                " -e rrna " # only high confident rRNAs are classified as rRNA
+  ))
+}
+```
+```{r run sortmerna}
+# used to remove mtDNA only
+for(i in seq_len(nrow(samples))){
+  system(paste0("rm -rf ", sortmerna_index, "kvdb")) # remove working folder after each run
+  system(paste0(sortmerna_source, " ",
+                mtDNA_ref, # reference genome index. index is automatically built for provided fasta
+                
+                # input reads
+                " --reads ", here, "output/03_rrna_removal/ribodetector/", samples$library_name[i], "_ribodetector_fwd.fq.gz",
+                " --reads ", here, "output/03_rrna_removal/ribodetector/", samples$library_name[i], "_ribodetector_rev.fq.gz",
+                
+                # output reads that aligned to genomes to be filtered out
+                " --aligned ", here, "output/03_rrna_removal/sortmerna/", samples$library_name[i], "_aligned",
+                # output reads that did not align to genomes to be filtered out (no mtDNA/rRNA/contaminant)
+                " --other ", here, "output/03_rrna_removal/sortmerna/", samples$library_name[i], "_sortmerna",
+                
+                " --fastx TRUE", # output file in fastq format
+                " --paired_in TRUE", # all/most non-rRNA reads placed in --other "fasta file" 
+                " -v TRUE", # verbose output when building the index
+                " --threads 50 ", # number of CPUs
+                " -m 25000", # memory to use
+                " --out2 TRUE", # Output paired reads into separate files
+                " --workdir ", sortmerna_index
+  ))
+}
+```
+
+Step 6: Alignment – STAR
+----------------------------------------------------------------
+```{r check strandedness}
+system(paste0(
+  "sudo docker run -it --rm ", # interactive docker + remove container once exited 
+  
+  # share the following folders with docker
+  " -v ", here, "output/03_rrna_removal/sortmerna:", here, "output/03_rrna_removal/sortmerna ",
+  " -v ", dirname(ref_gtf), ":", dirname(ref_gtf),
+  " -v ", dirname(ref_transcriptome), ":", dirname(ref_transcriptome),
+  
+  # docker to run
+  " mgibio/checkstrandedness ",
+  " check_strandedness ",
+  " --gtf ", ref_gtf,
+  " --transcripts ", ref_transcriptome,
+  " --reads_1 ", here, "output/03_rrna_removal/sortmerna/", samples$library_name[1], "_sortmerna_fwd.fq.gz",
+  " --reads_2 ", here, "output/03_rrna_removal/sortmerna/", samples$library_name[1], "_sortmerna_rev.fq.gz"
+))
+```
+```{r STAR: build index}
+# run in STAR mamba
+system(paste0(star_source,
+              " --runMode genomeGenerate ",
+              " --runThreadN ", 70, # number of CPUs
+              " --genomeDir ", dirname(ref_gtf), # directory to create index
+              " --genomeFastaFiles ", ref_genome, # reference genome sequences
+              
+              " --genomeSAindexNbases 14 ",
+              # min(14, log2(GenomeLength)/2 - 1) 
+              #  min(14, log2(2.3e9)/2 - 1) = 14
+              
+              " --genomeChrBinNbits 18 ",
+              # min(18,log2[max(GenomeLength/NumberOfReferences,ReadLength)])
+              # min(18,log2(max((2.3e9/1),61))) = 18
+              
+              " --sjdbGTFfile ", ref_gtf, # path to anotation file
+              " --sjdbGTFfeatureExon exon ", # feature type in GTF file to be used as exons for building transcripts
+              " --sjdbGTFtagExonParentTranscript transcript_id ", # GTF attribute name for parent transcript ID
+              " --sjdbGTFtagExonParentGene gene_id ", # GTF attribute name for parent gene ID
+              
+              " --sjdbOverhang 101 " 
+              # max(ReadLength)-1
+))
+```
+```{r STAR: quantify transcripts}
+for(i in seq_len(nrow(samples))){
+  system(paste0(star_source,
+                " --genomeDir ", dirname(ref_gtf), # directory with genome index
+                
+                " --readFilesIn ", # input files
+                here, "output/03_rrna_removal/sortmerna/", samples$library_name[i], "_sortmerna_fwd.fq.gz ", # read 1
+                here, "output/03_rrna_removal/sortmerna/", samples$library_name[i], "_sortmerna_rev.fq.gz ", # read 2
+                
+                " --runThreadN 70", # number of CPUs
+                " --readFilesCommand zcat", # use zcat to uncompress the .gz fastq files
+                
+                # prefix of outputfiles
+                " --outFileNamePrefix ", here, "output/04_alignments/STAR/", samples$library_name[i], "/", samples$library_name[i], 
+                " --outSAMtype BAM SortedByCoordinate ", # output bam alignment file Sorted By Coordinates
+                " --outReadsUnmapped Fastx" # output unaligned reads as fastq
+  ))
+}
+```
+```{r qualimap}
+# reads counting
+for(i in seq_len(nrow(samples))){
+  system(paste0(
+    "unset DISPLAY && ", qualimap_source,
+    " rnaseq ", # for RNASeq QC analysis
+    " --java-mem-size=60G ", # set amount of memory
+    " -outdir ", here, "/output/01_qa/qualimap/", samples$library_name[i],
+    " -gtf ", ref_gtf, # reference annotation file
+    " -paired ", # paired ends reads
+    " --sequencing-protocol ", "strand-specific-reverse ", # strandedness of reads
+    " -bam ", here, "output/04_alignments/STAR/", samples$library_name[i], "/", samples$library_name[i], "Aligned.sortedByCoord.out.bam"))
+}
+```
+
+Step 7: Read Counting – HTSeq
+----------------------------------------------------------------
+```{r run htseq-count}
+#reads counting
+for(i in seq_len(nrow(samples))){
+  system(paste0(htseq_count_source,
+                " --format bam ", # format of the input files
+                " --idattr=gene_id ", # GFF attribute to be used as feature ID
+                " --order pos ", # how the alignment is sorted (name/position)
+                " --mode union ", # how to handle reads overlapping more than one feature
+                " --stranded reverse", # read strandedness (check "strandedness" section)
+                " -n 80 ", # number of CPUs
+                
+                # input bam alignment file
+                here, "output/04_alignments/STAR/", samples$library_name[i],"/", samples$library_name[i], "Aligned.sortedByCoord.out.bam ",
+                # reference annotation
+                ref_gtf, 
+                # output counts folder
+                " > ", here, "output/05_count/htcounts/", samples$library_name[i], "_union_name.count"
+  ))
+}
+```
+```{build count table}
+# save htcounts count matrix
+temp1 <- read.csv(paste0(here, "output/05_count/htcounts/", samples$library_name[1], 
+                         "_union_name.count"), sep="\t", header=F)
+temp2 <- data.frame(temp1$V2)
+row.names(temp2) <- temp1$V1
+for(i in seq_len(nrow(samples))){
+  temp3 <- NULL
+  temp3 <- read.csv(paste0(here, "output/05_count/htcounts/", samples$library_name[i], 
+                         "_union_name.count"), sep="\t", header=F)
+  temp2[i] <- as.integer(temp3$V2)
+  colnames(temp2)[i] <- as.character(samples$library_name[i])
+}
+write.csv(x = temp2, file = paste0(here, "output/05_count/htcounts/htcounts_merged_counts.csv"))
+```

@@ -1,0 +1,322 @@
+---
+title: "Ligand-Receptor plot interactions"
+author: "Ravindra Naraine"
+date: "March 03, 2025"
+subtitle: "Ligand-Receptor Daniotalk - plot interactions (adapted from DanioTalk GitHub) - partc"
+abstract: |
+  This notebook continues the analysis described in **RNA redistribution driven by alterations in transcription during early embryogenesis of rainbow trout**. It focuses on the post-processing of ligand–receptor candidates in *Oncorhynchus mykiss* (rainbow trout) embryos. It presents the third part of the ligand–receptor interaction analysis. Building on differential gene expression between the extreme animal (section A) and vegetal (section E) poles across four embryonic stages (0-hpf, 1-hpf, 1-dpf, 3-dpf), this notebook focuses on visualizing the most confident ligand–receptor pairs using high-resolution chord diagrams. Interaction scores incorporate known human ligand–receptor databases, conservation, and expression metrics. This visualization helps identify polarized communication modules between embryonic domains.
+  This analysis is adapted from the original `script-circ_v3_2 group visualizer.R` available at [DanioTalk GitHub](https://github.com/DanioTalk/daniotalk/tree/master/Scripts).
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+# **Ligand-Receptor Daniotalk**
+```{r setup, include=TRUE, cache=TRUE}
+# location of working folder
+here <- "./06_ligand_receptors/"
+```
+
+# **Install and Load Required Libraries**
+```{r libraries, echo=FALSE, message=FALSE, warning=FALSE}
+# Set memory limit for Java and reproducibility seed
+options(java.parameters = "-Xmx30000m")
+set.seed(100)
+
+# List of required packages (from CRAN and Bioconductor)
+required_packages <- c("qs2", "tidyverse", "png", 
+                       "scales", "grDevices",
+                       "ComplexHeatmap", "circlize",
+                       "glue")
+
+# Apply the function to load required packages
+invisible(lapply(required_packages, function(x) {
+  suppressPackageStartupMessages(library(x, character.only = TRUE))
+}))
+```
+
+# **Analysis settings**
+```{r}
+# Load processed ligand-receptor interaction results
+df = readxl::read_excel("Resulting-ligand-receptor-pairs.xlsx")
+
+# ==== USER SETTINGS ====
+# Filter to focus on interactions where either cell type is included (use "any_cell" to include all)
+cell_lig = c("any_cell")
+cell_rec = c("any_cell")
+
+# Choose which ranking metric to prioritize in plotting:
+# - Ranking1: Based on known human LR interactions (e.g. from STRING, IID, CellChat)
+# - Ranking2: Ranking1 * fold changes — includes expression strength
+# - Ranking3: Fold changes * STRING score (without extra boost from physical interaction)
+ranking = "Ranking1"
+
+# Number of top-ranked interactions to visualize in the plot
+howmany = 50
+
+# Optional: restrict to specific ligands or receptors (otherwise all are included)
+receptors_list = c()
+ligands_list = c()
+
+# Confidence level thresholds (based on ScoreForRank1 / STRING scores)
+confidence_level = "Highest"  # Only strongest evidence interactions
+
+# Chord diagram aesthetics
+transparency_level = .2
+color_palette = "Inferno"              # Link colors
+cell_group_color_palette = "Viridis"   # Arc section colors (for cell types)
+cell_group_text_color = "white"        # Cell group label color
+```
+
+# **Data preparation**
+```{r}
+# Create a filename for the output figure based on parameters
+outname = glue(
+  "Receptors-{cell_rec}-vs-Ligands-{cell_lig}-top-{howmany}-interactions-ranking-{ranking}-confidence-{confidence_level}.tiff"
+)
+
+# Select relevant columns and determine which ranking column to use
+final = df %>% 
+  select(Gene.rec, Gene.lig, `Cell.type.rec`, `Cell.type.lig`,
+         Ranking1, Ranking2, Ranking3, ScoreForRank1, ScoreForRank2, ScoreForRank3) %>%
+  mutate(
+    Rank = case_when(
+      ranking == "Ranking1" ~ Ranking1,
+      ranking == "Ranking2" ~ Ranking2,
+      ranking == "Ranking3" ~ Ranking3
+    ),
+    Score = ScoreForRank1  # Use this as a proxy for interaction confidence
+  ) %>%
+  select(Gene.rec, Gene.lig, `Cell.type.rec`, `Cell.type.lig`, Score, Rank)
+
+# Filter by ligand or receptor cell types, if specified
+if (!("any_cell" %in% cell_lig)) {
+  final = final %>% filter(tolower(`Cell.type.lig`) %in% tolower(cell_lig))
+}
+if (!("any_cell" %in% cell_rec)) {
+  final = final %>% filter(tolower(`Cell.type.rec`) %in% tolower(cell_rec))
+}
+
+# Optional: restrict to user-defined ligand/receptor lists
+if (length(receptors_list) != 0) {
+  final = final %>% filter(Gene.rec %in% receptors_list)
+}
+if (length(ligands_list) != 0) {
+  final = final %>% filter(Gene.lig %in% ligands_list)
+}
+
+# Filter by interaction confidence level (based on Score)
+final = if (confidence_level == "Highest") {
+  final %>% filter(Score >= 900)
+} else if (confidence_level == "High") {
+  final %>% filter(Score >= 700)
+} else if (confidence_level == "Medium") {
+  final %>% filter(Score >= 400)
+} else {
+  final
+}
+
+# Rank and limit to top N interactions
+f = final %>% arrange(Rank) %>% head(howmany)
+f = f %>% select(Gene.rec, Gene.lig, `Cell.type.lig`, `Cell.type.rec`, Score)
+```
+
+# **Format names and assign grouping**
+```{r}
+# Capitalize gene and cell type names for clarity
+f = f %>% mutate(
+  Gene.rec = str_to_title(Gene.rec),
+  Gene.lig = str_to_title(Gene.lig),
+  `Cell.type.lig` = str_to_title(`Cell.type.lig`), 
+  `Cell.type.rec` = str_to_title(`Cell.type.rec`)
+)
+
+# Concatenate gene and cell type to create unique sector labels
+f.mutated = f %>% mutate(
+  Gene.rec = paste0(Gene.rec, "---", `Cell.type.rec`),
+  Gene.lig = paste0(Gene.lig, "---", `Cell.type.lig`)
+)
+
+# Create mapping of gene sectors to their originating cell types
+group = c(f.mutated$`Cell.type.rec`, f.mutated$`Cell.type.lig`) %>% 
+  setNames(c(f.mutated$Gene.rec, f.mutated$Gene.lig))
+group = group[unique(names(group))]
+```
+
+# **Chord diagram plotting**
+```{r add chord}
+# === Open TIFF graphics device for high-resolution export ===
+# This defines the output resolution, size, and format of the figure
+tiff(outname, 3000, 2000, res = 500, compression = "lzw")
+# tiff(outname, 6000, 4000, res = 500, compression = "lzw")
+
+# === STEP 1: Assign colors to genes based on interaction score ===
+
+# Extract unique ligand and receptor gene-sector labels
+genesToAssignColors <- unique(c(f.mutated$Gene.rec, f.mutated$Gene.lig))
+
+# Calculate the average interaction score per gene (regardless of role)
+score_df <- f.mutated %>%
+  pivot_longer(cols = c(Gene.rec, Gene.lig), names_to = "type", values_to = "gene") %>%
+  group_by(gene) %>%
+  summarise(mean_score = mean(Score, na.rm = TRUE)) %>%
+  ungroup()
+
+# Create a color scale mapping scores to ribbon colors
+min_score <- min(score_df$mean_score, na.rm = TRUE)
+max_score <- max(score_df$mean_score, na.rm = TRUE)
+color_func <- col_numeric(
+  palette = viridisLite::magma(100),  # Smooth purple → red → orange
+  domain = c(min_score, max_score)
+)
+
+# Assign color to each gene based on its score (for ribbon coloring)
+chordColors <- setNames(color_func(score_df$mean_score), score_df$gene)
+
+# === Assign colors to sector arcs based on animal vs vegetal identity ===
+
+# Extract "section" (Animal or Vegetal) from sector names
+sector_metadata <- tibble(gene = genesToAssignColors) %>%
+  mutate(
+    section = sub(".*---", "", gene),
+    pole = case_when(
+      section == "Animal" ~ "Animal",
+      section == "Vegetal" ~ "Vegetal",
+      TRUE ~ "unknown"
+    )
+  )
+
+# Count how many genes belong to each pole
+n_animal <- sum(sector_metadata$pole == "Animal")
+n_vegetal <- sum(sector_metadata$pole == "Vegetal")
+
+# Define how many colors to skip to create spacing in the color ramp
+skip_step <- 4
+
+# Create more color points than needed, then sub-sample every `skip_step` for contrast
+full_animal_ramp  <- colorRampPalette(c("#1F103F", "#5C4D8F", "#9C88C1"))(n_animal * skip_step)
+full_vegetal_ramp <- colorRampPalette(c("#5B341A", "#B96E3E", "#F2AB79"))(n_vegetal * skip_step)
+
+# Take every 4th color (adjust skip_step above to tune contrast)
+animal_ramp <- NULL
+if(length(full_animal_ramp) > 0){
+  animal_ramp  <- full_animal_ramp[seq(1, length(full_animal_ramp), by = skip_step)][seq_len(n_animal)]
+}
+vegetal_ramp <- NULL
+if(length(full_vegetal_ramp) > 0){
+  vegetal_ramp <- full_vegetal_ramp[seq(1, length(full_vegetal_ramp), by = skip_step)][seq_len(n_vegetal)]
+}
+
+# Assign final color to each gene-sector from the appropriate ramp
+sector_metadata <- sector_metadata %>%
+  group_by(pole) %>%
+  mutate(idx = row_number()) %>%
+  ungroup() %>%
+  mutate(color =
+    if (!is.null(animal_ramp) && !is.null(vegetal_ramp)) {
+      case_when(
+        pole == "Animal"  ~ animal_ramp[idx],
+        pole == "Vegetal" ~ vegetal_ramp[idx],
+        TRUE              ~ "#CCCCCC"
+      )
+    } else if (!is.null(animal_ramp)) {
+      if_else(pole == "Animal", animal_ramp[idx], "#CCCCCC")
+    } else if (!is.null(vegetal_ramp)) {
+      if_else(pole == "Vegetal", vegetal_ramp[idx], "#CCCCCC")
+    } else {
+      "#CCCCCC"
+    }
+  )
+
+# Create named vector for use in sector coloring (grid.col in chordDiagram)
+sectorColors <- setNames(sector_metadata$color, sector_metadata$gene)
+
+# === STEP 2: Generate the chord diagram ===
+
+circos.clear()  # Reset any previous circular layout
+circos.par(start.degree = -45)  # Rotate the circle
+
+# Create the chord diagram with two tracks: one for arcs, one for labels
+chordDiagram(
+  f.mutated %>% arrange(`Cell.type.lig`, `Cell.type.rec`) %>%
+    select(Gene.rec, Gene.lig, Score),
+  annotationTrack = c("grid"),      # Outer grid with sectors
+  group = group,                    # Group arcs by cell type
+  transparency = transparency_level,  # Link transparency
+  grid.col = sectorColors,          # Arc sector colors
+  col = chordColors,                # Link (ribbon) colors by score
+  preAllocateTracks = list(
+    list(track.height = mm_h(6), track.margin = c(mm_h(12), 0)),  # Arc band (outer ring)
+    list(track.height = mm_h(1)  # ← Previously auto-calculated, now fixed
+    #        max(strwidth(
+    #   names(group) %>% strsplit("---") %>% unlist() %>% .[1]
+    # )
+    ))  # Label track
+  )
+
+
+# === STEP 3: Add colored arcs and labels for each cell type ===
+
+# Prepare data: group genes by their cell type label
+cells <- tibble(gene = names(group), cell = unname(group)) %>%
+  split(.$cell)
+
+# Manually define arc colors for animal and vegetal groups (adjust if needed)
+cells_cols <- c("Animal" = "#9C88C1", "Vegetal" = "#F2AB79")  # Animal = lavender, Vegetal = peach
+cells_cols <- cells_cols[unique(sector_metadata$section)]
+
+# Highlight arcs and label with bold text
+col_idx <- 1
+for (df in cells) {
+  highlight.sector(df$gene, track.index = 1, 
+                   col = cells_cols[col_idx],
+                   padding = c(0, 0, 0, 0),     # No extra space inside the band
+                   text = df$cell %>% unique(),  # Cell type name
+                   cex = 1,                     # Text size
+                   text.col = cell_group_text_color,
+                   niceFacing = TRUE)
+  col_idx <- col_idx + 1
+}
+
+# === STEP 4: Annotate ligand/receptor genes with symbols ===
+
+# Use ▲ for ligand and ■ for receptor
+lig_char <- "\U25B2"
+rec_char <- "\U25A0"
+
+# Add gene symbols with Unicode icons for ligand/receptor
+circos.track(track.index = 2, panel.fun = function(x, y) {
+  label <- CELL_META$sector.index %>% str_split("---") %>% unlist() %>% .[1]
+  label <- paste(label, ifelse(label %in% f$Gene.rec, rec_char, lig_char))
+  circos.text(CELL_META$xcenter, CELL_META$ylim[1], label, 
+              facing = "clockwise", cex = 0.6, niceFacing = TRUE, adj = c(0, 1))
+}, bg.border = NA)
+
+# === STEP 5: Add vertical color legend to the right ===
+
+# Create a 2-point continuous legend using the ribbon color scale
+score_legend <- Legend(
+  title = "Interaction Score",           # Legend title
+  col_fun = color_func,                  # Color gradient
+  at = c(max_score, min_score),          # Tick positions
+  labels = c("High", "Low"),             # Custom tick labels
+  direction = "vertical",
+  title_position = "topleft",
+  title_gp = gpar(fontsize = 8),  # Title font
+  labels_gp = gpar(fontsize = 8)                     # Label font
+)
+
+# Draw legend to the right of the plot (adjust x to shift left/right)
+draw(score_legend,
+     x = unit(1, "npc"),  # adjust as needed
+     y = unit(0.5, "npc"),
+     just = c("right", "center"))
+
+# === Finalize output ===
+dev.off()
+```
+
+# **Cleanup and save object**
+```{r save data to create the chord diagram}
+qs_savem(f.mutated, group, file = file.path(here, "output", "daniotalk.qs2"))
+```
