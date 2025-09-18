@@ -4,6 +4,7 @@
 [![GEO Dataset](https://img.shields.io/badge/dataset-GEO%3AGSE304790-blue)](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE304790)
 ![Flexdashboard](https://img.shields.io/badge/viewer-flexdashboard-green)
 ![R version](https://img.shields.io/badge/R-4.5.0-blue)
+[![DOI](https://zenodo.org/badge/1058659106.svg)](https://doi.org/10.5281/zenodo.17152237)
 
 <p align="center">
   <img src="manuscript_figures/graphical_abstract.png" width="900" height="500"/>
