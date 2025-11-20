@@ -1,6 +1,7 @@
 # Analysis of Transcripts During Early Trout Development
 
 [![bioRxiv](https://img.shields.io/badge/preprint-bioRxiv-orange)](https://www.biorxiv.org/)
+[![published](https://img.shields.io/badge/published-Developmental%20Biology-blue)](https://doi.org/10.1016/j.ydbio.2025.11.004)
 [![GEO Dataset](https://img.shields.io/badge/dataset-GEO%3AGSE304790-blue)](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE304790)
 ![Flexdashboard](https://img.shields.io/badge/viewer-flexdashboard-green)
 ![R version](https://img.shields.io/badge/R-4.5.0-blue)
