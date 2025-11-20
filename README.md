@@ -12,7 +12,7 @@
 
 This repository contains the analysis pipeline used in our study of early embryonic development in rainbow trout (*Oncorhynchus mykiss*) and zebrafish (*Danio rerio*). The primary focus is on **TOMO-seq** (tomographic RNA sequencing), applied to three experimental datasets spanning the freshly fertilized egg to the early blastula stage. The github layout and code workflow has been optimized with the help of ChatGPT to improve readability
 
-**Publication**: **"RNA redistribution driven by alterations in transcription during early embryogenesis of rainbow trout"** (*Journal name*, YYYY) – [link to article](https://blahblah.blah).
+**Publication**: **"RNA redistribution driven by alterations in transcription during early embryogenesis of rainbow trout"** [(*Developmental Biology*, 2026)](https://doi.org/10.1016/j.ydbio.2025.11.004).
 
 The analysis is based on TOMO-seq across multiple experiments involving early embryonic stages:
 
