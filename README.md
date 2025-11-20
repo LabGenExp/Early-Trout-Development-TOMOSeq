@@ -178,6 +178,6 @@ renv::restore()
 
 ## 📊 Manuscript figures
 
-This section contains the R code used to generate the figures for our manuscript, **"RNA redistribution driven by alterations in transcription during early embryogenesis of rainbow trout"** (*Journal name*, YYYY).
+This section contains the R code used to generate the figures for our manuscript, **"RNA redistribution driven by alterations in transcription during early embryogenesis of rainbow trout"** [(*Developmental Biology*, 2026)](https://doi.org/10.1016/j.ydbio.2025.11.004).
 
 📂 Scripts available in [`manuscript_figures`](manuscript_figures/).
